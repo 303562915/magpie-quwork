@@ -16,13 +16,98 @@
 import { DEFAULT_MODELS, ENV_HEADERS, MODELS_PATH, MODEL_BASE_URL, CATALOG_TIMEOUT_MS } from "../constants.mjs"
 
 /**
+ * 上游能力声明 → magpie 的两组模态字段（**唯一一处映射**）。
+ *
+ * # 只认上游说的话，不猜
+ *
+ *	vision          `capabilities.vision === true`
+ *	                ∪ `capabilities.input_modalities` 含 `image`
+ *	                ∪ 顶层 `supportsImage === true` / `vision === true`
+ *	模态数组         上游没给（或给了空数组）→ 回落 `["text"]`
+ *	toolcall        `capabilities.function_calling !== false`（及顶层同名字段）
+ *	reasoning       `capabilities.reasoning === true`
+ *
+ * # 为什么 vision 与模态数组要互相补齐
+ *
+ * 上游说 `vision: true` 但没在 `input_modalities` 里写 `image` 时，两组声明会
+ * 自相矛盾：magpie 的「识图模型」判据看的是 `modalities.input`，而其它地方看
+ * `capabilities.input.image` —— 一份声明两个答案。这里补进 `image`，方向只有一个：
+ * vision 为真则 image 进列表。
+ *
+ * @param {{capabilities?: any, supportsImage?: boolean, vision?: boolean}} [entry]
+ * @returns {{vision: boolean, toolcall: boolean, reasoning: boolean,
+ *   inputModalities: string[], outputModalities: string[],
+ *   input: {text: boolean, image: boolean, audio: boolean, video: boolean, pdf: boolean},
+ *   output: {text: boolean, image: boolean, audio: boolean, video: boolean, pdf: boolean}}}
+ */
+export function mapUpstreamCapabilities(entry) {
+  const raw = entry?.capabilities
+  const up = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}
+
+  const declaredIn = stringList(up.input_modalities)
+  const declaredOut = stringList(up.output_modalities)
+
+  // 上游一个字都没说 → 纯文本。**不按模型名猜。**
+  const input = declaredIn.length > 0 ? declaredIn : ["text"]
+  const output = declaredOut.length > 0 ? declaredOut : ["text"]
+
+  const vision =
+    up.vision === true ||
+    entry?.vision === true ||
+    entry?.supportsImage === true ||
+    input.includes("image")
+  if (vision && !input.includes("image")) input.push("image")
+
+  return {
+    vision,
+    toolcall: up.function_calling !== false && entry?.function_calling !== false,
+    reasoning: up.reasoning === true,
+    inputModalities: input,
+    outputModalities: output,
+    input: modalityFlags(input),
+    output: modalityFlags(output),
+  }
+}
+
+/**
+ * 把模态字符串数组摊成 magpie 要的布尔对象。
+ *
+ * ⚠ 必须**显式写全**五个布尔值：省掉不等于「按 text 处理」——
+ * magpie 只认 `typeof input.image === "boolean"`，没写会退到 models.dev 按裸
+ * 模型 id 投票，同名模型在别家标过 image 就会被当成能收图。
+ */
+function modalityFlags(mods) {
+  const has = (m) => mods.includes(m)
+  return { text: has("text"), image: has("image"), audio: has("audio"), video: has("video"), pdf: has("pdf") }
+}
+
+/** 只留非空字符串并去重。 */
+function stringList(value) {
+  if (!Array.isArray(value)) return []
+  /** @type {string[]} */
+  const out = []
+  for (const v of value) {
+    if (typeof v !== "string") continue
+    const s = v.trim()
+    if (s && !out.includes(s)) out.push(s)
+  }
+  return out
+}
+
+/**
  * 把一个模型条目转成 magpie 的 model 形状。
  *
+ * ⚠ 能力**全部来自上游**（`mapUpstreamCapabilities`），本函数不写死任何一项：
+ * `supportsImage` 来自客户端的 `qurvis-model-config.json`（那就是上游自己的声明），
+ * 实时目录里若带 `capabilities` 则以它为准。
+ *
  * @param {any} provider
- * @param {{id: string, name?: string, contextWindow?: number, maxTokens?: number, supportsImage?: boolean}} e
+ * @param {{id: string, name?: string, contextWindow?: number, maxTokens?: number,
+ *   supportsImage?: boolean, vision?: boolean, capabilities?: any, function_calling?: boolean}} e
  */
 function toModel(provider, e) {
   const prior = provider?.models?.[e.id] ?? {}
+  const up = mapUpstreamCapabilities(e)
   return {
     ...prior,
     id: e.id,
@@ -33,12 +118,17 @@ function toModel(provider, e) {
     },
     capabilities: {
       ...(prior.capabilities ?? {}),
-      toolcall: true,
-      reasoning: true,
-      input: { text: true, image: e.supportsImage === true, audio: false, video: false, pdf: false },
+      toolcall: up.toolcall,
+      // 上游没声明 reasoning 时沿用客户端 compat 表的结论（这一族都带推理链）；
+      // 上游一旦声明（true / false 都算）就照抄 —— 这是「从上游读」而不是「一直为真」。
+      reasoning:
+        typeof e?.capabilities?.reasoning === "boolean" ? e.capabilities.reasoning : true,
+      input: up.input,
+      output: up.output,
     },
-    modalities: { input: ["text"], output: ["text"] },
-    attachment: false,
+    modalities: { input: up.inputModalities, output: up.outputModalities },
+    attachment: up.vision,
+    supportsImage: up.vision,
   }
 }
 
@@ -91,7 +181,13 @@ export async function fetchCatalog(opts) {
       name: String(src?.name ?? "") || id,
       contextWindow: Number(src?.context_window ?? src?.contextWindow) || 0,
       maxTokens: Number(src?.max_tokens ?? src?.maxTokens) || 0,
-      supportsImage: false,
+      // ── 能力：上游说了就带走，没说就**什么都不留**（映射处回落 text）──
+      //
+      // 这里曾经写死 `supportsImage: false`：于是哪怕上游明说这个模型收图，
+      // magpie 的「识图模型」里也永远没有它（同一个 bug 在 loomy 上就是发图卡死）。
+      capabilities: src?.capabilities,
+      supportsImage: typeof src?.supportsImage === "boolean" ? src.supportsImage : undefined,
+      vision: typeof src?.vision === "boolean" ? src.vision : undefined,
     }
   })
 }

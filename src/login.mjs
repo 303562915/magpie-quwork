@@ -26,7 +26,7 @@
 
 import { createHash } from "node:crypto"
 
-import { PLATFORM_BASE_URL, ENV_HEADERS, PLATFORM_TIMEOUT_MS } from "./constants.mjs"
+import { PLATFORM_BASE_URL, PLATFORM_TIMEOUT_MS } from "./constants.mjs"
 
 /** 发码路径（form 提交，`aliyun_captcha` 不需要）。§1 ✅ 实测 */
 export const SEND_CODE_PATH = "/api/sendVerifyCode"
@@ -119,7 +119,10 @@ export async function sendVerifyCode(opts) {
   const base = String(opts.platformBaseUrl ?? "").trim().replace(/\/+$/, "") || PLATFORM_BASE_URL
   const doFetch = opts.fetchImpl ?? ((...args) => globalThis.fetch(...args))
 
-  const headers = new Headers(ENV_HEADERS)
+  // ⚠ 只发 content-type + accept。**不要** X-QurWork-Env / X-QurWork-Version /
+  //    pi UA —— 真机实测：带上客户端头，服务端会要求阿里云滑块
+  //    （同一请求不带就是「验证码发送成功」）。
+  const headers = new Headers({ Accept: "application/json" })
   headers.set("Content-Type", "application/x-www-form-urlencoded")
 
   let resp
@@ -155,7 +158,8 @@ export async function loginWithCode(opts) {
   const base = String(opts.platformBaseUrl ?? "").trim().replace(/\/+$/, "") || PLATFORM_BASE_URL
   const doFetch = opts.fetchImpl ?? ((...args) => globalThis.fetch(...args))
 
-  const headers = new Headers(ENV_HEADERS)
+  // ⚠ 同 sendVerifyCode：平台接口不带 X-QurWork-*（带上会触发滑块校验）
+  const headers = new Headers({ Accept: "application/json" })
   headers.set("Content-Type", "application/json")
 
   let resp

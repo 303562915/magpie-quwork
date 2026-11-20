@@ -1,0 +1,963 @@
+// server.mjs QuWork 面板服务（magpie 的 page service 是**模块级具名导出**，不是钩子）。
+//
+// # 契约（与 magpie-loomy 同构，已在真机验证过）
+//
+//	magpie 把入口模块的**每个具名导出函数**都当插件调用，并注入它自己解析出的
+//	options（含 `port`）。服务在这个函数里自己 `listen`。
+//
+// # 三条硬规则
+//
+//	① **打开页面零上游请求**：HTML/JS 只是静态文件；所有平台调用都在用户点按钮之后
+//	② 所有平台接口**不带** X-QurWork-*（实测带上会触发风控；见 T-15）
+//	③ 不伪造额度、不写 `error`：拿不到就如实说拿不到
+//
+// 端口解析：`options.port` → `$PAGESVC_PORT` → 0（随机口）。
+
+import { createServer } from "node:http"
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
+
+import { PLATFORM_BASE_URL } from "./src/constants.mjs"
+import {
+  claimDailyReward,
+  fetchDailyRewardStatus,
+  fetchInviteRecords,
+  fetchInviteSummary,
+  fetchMonthlyGifts,
+  activateInvite,
+  redeemBenefit,
+} from "./src/invite.mjs"
+import { deviceIdentifierFrom } from "./src/login.mjs"
+import { readAll } from "./src/auth-store.mjs"
+import { windowsFromSelf } from "./src/hooks/usage.mjs"
+import { buildAuthorizeUrl, bindWechat, exchangeCode, newState, parseCallback } from "./src/wechat.mjs"
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const PAGE_DIR = join(HERE, "page")
+
+/**
+ * 面板设置的默认值（白名单：只有这些键会被写入文件）。
+ *
+ * ⚠ 端口改完要重启面板才生效（HTTP 服务已经在监听了）。
+ */
+export const DEFAULT_SETTINGS = Object.freeze({
+  port: 4392,
+  autoRefresh: false,
+  accountsConcurrency: 2,
+  recordsPages: 3,
+})
+
+/** 读一个 JSON 文件（不存在/损坏 → null，不抛）。 */
+function readJsonFile(file) {
+  try {
+    if (!existsSync(file)) return null
+    const v = JSON.parse(readFileSync(file, "utf8"))
+    return v && typeof v === "object" ? v : null
+  } catch {
+    return null
+  }
+}
+
+/** 原子写 JSON（先写临时文件再 rename）。 */
+function writeJsonFile(file, obj) {
+  try {
+    mkdirSync(dirname(file), { recursive: true })
+    const tmp = `${file}.tmp-quwork`
+    writeFileSync(tmp, JSON.stringify(obj, null, 2) + "\n", { mode: 0o600 })
+    renameSync(tmp, file)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 这个端口现在能不能 bind（默认实现：真去 listen 一次再关掉）。
+ *
+ * ⚠ 只用来**选端口**，不做健康检查 —— 判断「有没有人在听」在这里没意义。
+ *
+ * @param {number} port
+ * @returns {Promise<boolean>}
+ */
+function isPortFree(port) {
+  return new Promise((resolve) => {
+    const probe = createServer()
+    probe.once("error", () => resolve(false))
+    probe.once("listening", () => {
+      probe.close(() => resolve(true))
+    })
+    try {
+      probe.listen(port, "127.0.0.1")
+    } catch {
+      resolve(false)
+    }
+  })
+}
+
+/**
+ * 从 `start` 开始找一个能用的端口（最多试 `max` 个）。
+ *
+ * # 为什么必须显式回退
+ *
+ * 4392 被别的进程占着时，`server.listen` 会 `EADDRINUSE`，而 magpie 的面板
+ * 按钮只会「打不开」—— 用户完全看不出发生了什么。所以先探测再 listen。
+ *
+ * @param {{start?: number, max?: number, isFree?: (p: number) => Promise<boolean>}} [opts]
+ * @returns {Promise<number>} 可用端口；全被占则返回 0（调用方自己决定怎么办）
+ */
+export async function pickPort(opts = {}) {
+  const start = Number.isInteger(opts.start) && opts.start > 0 ? opts.start : 4392
+  const max = Number.isInteger(opts.max) && opts.max > 0 ? opts.max : 3
+  const free = typeof opts.isFree === "function" ? opts.isFree : isPortFree
+
+  for (let i = 0; i < max; i += 1) {
+    const port = start + i
+    if (await free(port)) return port
+  }
+  return 0
+}
+
+/**
+ * 是否允许「import 本模块就自动起面板」。
+ *
+ * ⚠ 默认**关**：`node --test` 会 import 到这个模块，自动 listen 会留下监听端口、
+ * 甚至和被测服务抢端口。生产环境由 magpie 通过 `QuWorkPage` 显式拉起；
+ * 只有用户显式设了 `QW_PANEL_AUTOSTART=1` 才自启。
+ *
+ * @param {Record<string, string|undefined>} [env]
+ * @returns {boolean}
+ */
+export function autostartEnabled(env = globalThis.process?.env ?? {}) {
+  const v = String(env?.QW_PANEL_AUTOSTART ?? "").trim().toLowerCase()
+  return v === "1" || v === "true" || v === "yes" || v === "on"
+}
+
+/** 打码一个 token（只留前 6 位与后 4 位）。 */
+function maskToken(v) {  const s = String(v ?? "").trim()
+  if (!s) return ""
+  if (s.length <= 12) return `${s.slice(0, 3)}***`
+  return `${s.slice(0, 6)}…${s.slice(-4)}`
+}
+
+/** 端口解析（与 loomy 一致的三级回退）。 */export function resolvePort(options, env, fallback = 0) {
+  const pick = (v) => {
+    const n = Number(v)
+    return Number.isInteger(n) && n > 0 && n < 65536 ? n : 0
+  }
+  return pick(options?.port) || pick(env?.PAGESVC_PORT) || pick(fallback) || 0
+}
+
+/** 读请求体（有上限，畸形输入不该把进程内存吃掉）。 */
+async function readBody(req, limit = 1 << 20) {
+  /** @type {Buffer[]} */
+  const chunks = []
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > limit) throw new Error("body too large")
+    chunks.push(chunk)
+  }
+  if (chunks.length === 0) return ""
+  return Buffer.concat(chunks).toString("utf8")
+}
+
+/**
+ * 发 JSON（**带 CORS**，HEAD 时只发头）。
+ *
+ * @param {import("node:http").ServerResponse} res
+ * @param {number} status
+ * @param {any} obj
+ * @param {{head?: boolean}} [opts]
+ */
+function sendJson(res, status, obj, opts = {}) {
+  const text = JSON.stringify(obj)
+  res.writeHead(status, {
+    ...corsHeaders(opts.pna),
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+  })
+  res.end(opts.head ? undefined : text)
+}
+
+/**
+ * 从 `plugin-auth.json` 取这个账号的凭据（页面只服务"当前账号"，取第一个 quwork 条目）。
+ *
+ * @param {string} configDir
+ * @param {any} [override] 测试/排障可直接给 `{llmToken, token}`
+ */
+export function resolveCredential(configDir, override) {
+  if (override && (override.llmToken || override.token)) return override
+  const all = readAll(configDir)
+  const key = Object.keys(all).find((k) => k === "quwork" || k.startsWith("quwork#"))
+  if (!key) return {}
+  const v = all[key] ?? {}
+  return {
+    accountId: v.accountId,
+    llmToken: v.llmToken ?? v.access,
+    token: v.token ?? v.refresh,
+    expire: v.expire,
+    phone: v.phone,
+    metadata: v.metadata,
+  }
+}
+
+const MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".png": "image/png",
+}
+
+/**
+ * CORS 头（**所有**响应都要带）。
+ *
+ * # 为什么必须有（真机根因）
+ *
+ * magpie 的插件页是 `file:` / 自定义协议加载的（`magpie.page.file = page/gateway.html`），
+ * 页面 origin 是 **`null`**。此时 `fetch("http://127.0.0.1:4392/api/accounts")`
+ * 属于**跨域**请求：服务端不回 CORS 头 ⇒ 浏览器直接拦掉 ⇒ 表格永远「加载中…」。
+ *
+ * Chrome 还有 PNA（Private Network Access）：从 `file:` 访问本机地址会先发
+ * `Access-Control-Request-Private-Network: true` 的预检，必须回
+ * `Access-Control-Allow-Private-Network: true`（loomy 也这么做）。
+ */
+export const CORS = Object.freeze({
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Private-Network": "true",
+  Vary: "Access-Control-Request-Private-Network, Origin",
+})
+
+/**
+ * 造一个面板 HTTP 服务（不 listen）。
+ *
+ * @param {{configDir?: string, platformBaseUrl?: string, log?: any, fetchImpl?: typeof fetch,
+ *   credential?: any}} [opts]
+ */
+export function createPageServer(opts = {}) {
+  const configDir = String(opts.configDir ?? "").trim()
+  const platformBaseUrl = String(opts.platformBaseUrl ?? "").trim() || PLATFORM_BASE_URL
+  const log = opts.log ?? console
+  const fetchImpl = opts.fetchImpl
+  const now = typeof opts.now === "function" ? opts.now : () => Date.now()
+
+  /** 当前凭据（每次请求现读，用户在别处重新登录后不必重启面板）。 */
+  const cred = () => resolveCredential(configDir, opts.credential)
+
+  /** 本进程内的 job 表（key = jobId）——页面轮询进度用。 */
+  const jobs = new Map()
+
+  /**
+   * 微信绑定的 state 表：`state → { key, at }`。
+   *
+   * 内存即可（重启丢失 = 重新扫码），10 分钟内有效、用后即焚。
+   */
+  const wechatStates = new Map()
+  const WECHAT_STATE_TTL_MS = 10 * 60 * 1000
+
+  /** 面板自己的 JSON 文件（都在 magpie 配置目录里）。 */
+  const settingsFile = () => join(configDir, "quwork-panel-settings.json")
+  const accountsCacheFile = () => join(configDir, "quwork-accounts-cache.json")
+  const inviteCacheFile = () => join(configDir, "quwork-invite-cache.json")
+  const rewardCacheFile = () => join(configDir, "quwork-reward-cache.json")
+
+  // ── 多账号基础设施：所有平台操作都要「按 key 找账号 → 用它自己的 token」──
+
+  /** `plugin-auth.json` 里所有 quwork 条的 key（顺序即文件顺序）。 */
+  const listKeys = () => {
+    const all = readAll(configDir)
+    return Object.keys(all).filter((k) => k === "quwork" || k.startsWith("quwork#"))
+  }
+
+  /** 某个 key 的完整凭据（缺 key 就是空对象）。 */
+  const credOfKey = (key) => {
+    const all = readAll(configDir)
+    const v = all[String(key ?? "")]
+    if (!v) return {}
+    return {
+      key,
+      accountId: String(v.accountId ?? v.phone ?? v.metadata?.nickname ?? ""),
+      llmToken: v.llmToken ?? v.access,
+      token: v.token ?? v.refresh,
+      expire: v.expire,
+      phone: v.phone,
+    }
+  }
+
+  /** 某个 key 的平台 token（没有就是空串）。 */
+  const tokenOfKey = (key) => String(credOfKey(key).token ?? "").trim()
+
+  /** 某个 key 的显示名（账号）。 */
+  const accountIdOfKey = (key) => credOfKey(key).accountId || String(key ?? "")
+
+  /** 请求里的 `keys`；不传 = 全部账号；非法 key 会被过滤掉。 */
+  const pickKeys = (input) => {
+    const mine = listKeys()
+    const wanted = Array.isArray(input?.keys) ? input.keys.map(String) : []
+    if (wanted.length === 0) return mine
+    return mine.filter((k) => wanted.includes(k))
+  }
+
+  /** 批量的并发度（来自面板设置，最小 1）。 */
+  const concurrency = () => {
+    const v = Number(readJsonFile(settingsFile())?.accountsConcurrency ?? DEFAULT_SETTINGS.accountsConcurrency)
+    return Number.isFinite(v) && v > 0 ? Math.floor(v) : 1
+  }
+
+  /** 简单的并发池：最多 `limit` 个 worker 同时跑 `fn`。 */
+  const runLimited = async (items, limit, fn) => {
+    const queue = [...items]
+    const workers = Array.from({ length: Math.min(Math.max(1, limit), queue.length) }, async () => {
+      while (queue.length) {
+        const item = queue.shift()
+        await fn(item)
+      }
+    })
+    await Promise.all(workers)
+  }
+
+  const api = {
+    /**
+     * 账号列表：`plugin-auth.json` 里**所有** `quwork*` 条目。
+     *
+     * ⚠ 只读本地文件 + 缓存，**不打上游** —— 「打开页面零上游请求」的前提。
+     * 积分来自上一次 `accounts/refresh` 留下的 `quwork-accounts-cache.json`；没有就是 null。
+     */
+    async accounts() {
+      const all = readAll(configDir)
+      const cache = readJsonFile(accountsCacheFile())
+      /** @type {Record<string, any>} */
+      const cached = cache?.accounts ?? {}
+
+      const accounts = Object.keys(all)
+        .filter((k) => k === "quwork" || k.startsWith("quwork#"))
+        .map((key) => {
+          const v = all[key] ?? {}
+          const c = cached[key] ?? {}
+          return {
+            key,
+            accountId: String(v.accountId ?? v.phone ?? v.metadata?.nickname ?? ""),
+            phone: String(v.phone ?? v.metadata?.phone ?? ""),
+            llmToken: maskToken(v.llmToken ?? v.access),
+            hasPlatformToken: Boolean(String(v.token ?? v.refresh ?? "").trim()),
+            points: c.points ?? null,
+            expires: Number(v.expire) || 0,
+            models: c.models ?? null,
+            cachedAt: c.at ?? 0,
+          }
+        })
+
+      return { ok: true, cached: true, at: Number(cache?.updatedAt) || 0, updatedAt: Number(cache?.updatedAt) || 0, accounts }
+    },
+
+    /**
+     * 刷新账号积分（**打上游**；每个账号一次 `/api/user/self`），并写缓存。
+     *
+     * 支持 `{ keys: [...] }`：只刷选中的账号（表格里的「刷新选中」）。
+     * 不传 `keys` = 全部。
+     */
+    async accountsRefresh(input) {
+      const all = readAll(configDir)
+      const mine = Object.keys(all).filter((k) => k === "quwork" || k.startsWith("quwork#"))
+      const wanted = Array.isArray(input?.keys) ? input.keys.map(String) : []
+      const keys = wanted.length ? mine.filter((k) => wanted.includes(k)) : mine
+
+      /** @type {Record<string, any>} */
+      const accounts = {}
+      const doFetch = fetchImpl ?? ((...a) => globalThis.fetch(...a))
+      let okCount = 0
+
+      for (const key of keys) {
+        const v = all[key] ?? {}
+        const token = String(v.token ?? v.refresh ?? "").trim()
+        if (!token) {
+          accounts[key] = { points: null, at: now(), error: "没有平台 token" }
+          continue
+        }
+        try {
+          const resp = await doFetch(`${platformBaseUrl}/api/user/self`, {
+            method: "GET",
+            headers: (() => {
+              const h = new Headers({ Accept: "application/json" })
+              h.set("Authorization", `Bearer ${token}`)
+              return h
+            })(),
+            signal: AbortSignal.timeout(10_000),
+          })
+          const body = await resp.json().catch(() => null)
+          const total = body?.data?.points_entitlement?.total_points
+          accounts[key] = { points: total ?? null, at: now() }
+          okCount += 1
+        } catch (e) {
+          accounts[key] = { points: null, at: now(), error: String(e?.message ?? e).slice(0, 120) }
+        }
+      }
+
+      const stamp = now()
+      // 合并：只更新本次刷的那些，别把别的账号的缓存抹掉
+      const prev = readJsonFile(accountsCacheFile())?.accounts ?? {}
+      writeJsonFile(accountsCacheFile(), { updatedAt: stamp, accounts: { ...prev, ...accounts } })
+      return { ok: true, cached: false, at: stamp, updatedAt: stamp, okCount, total: keys.length, accounts }
+    },
+
+    /**
+     * 删除账号（从 `plugin-auth.json` 里摘掉指定 key）。
+     *
+     * ⚠ **先备份**：`plugin-auth.json.bak-<时间戳>`。删号是不可逆操作，
+     * 用户点错一次就得重新登录一遍 —— 备份是成本最低的保险。
+     */
+    async accountsDelete(input) {
+      const wanted = (Array.isArray(input?.keys) ? input.keys : []).map(String).filter(Boolean)
+      if (wanted.length === 0) return { ok: false, error: "没有指定要删除的账号" }
+      if (!configDir) return { ok: false, error: "没有配置目录，无法删除" }
+
+      const file = join(configDir, "plugin-auth.json")
+      if (!existsSync(file)) return { ok: false, error: "plugin-auth.json 不存在" }
+
+      const all = readAll(configDir)
+      const mine = Object.keys(all).filter((k) => k === "quwork" || k.startsWith("quwork#"))
+      const hit = mine.filter((k) => wanted.includes(k))
+      if (hit.length === 0) return { ok: false, error: "没有匹配的账号" }
+
+      // ① 备份（失败就不删，宁可不做也不丢凭据）
+      const stamp = new Date(now()).toISOString().replace(/[:.]/g, "-")
+      const backup = `${file}.bak-${stamp}`
+      try {
+        writeFileSync(backup, readFileSync(file), { mode: 0o600 })
+      } catch (e) {
+        return { ok: false, error: `备份失败，未删除任何账号：${String(e?.message ?? e).slice(0, 120)}` }
+      }
+
+      // ② 删
+      for (const k of hit) delete all[k]
+      if (!writeJsonFile(file, all)) return { ok: false, error: "写回 plugin-auth.json 失败（备份已保留）" }
+
+      // ③ 顺手清掉账号缓存里对应的条目
+      const cache = readJsonFile(accountsCacheFile())
+      if (cache?.accounts) {
+        for (const k of hit) delete cache.accounts[k]
+        writeJsonFile(accountsCacheFile(), cache)
+      }
+
+      return { ok: true, deleted: hit, backup }
+    },
+
+    /**
+     * 邀请码信息：**只读缓存**（`quwork-invite-cache.json`）。
+     * 没有缓存就 `{cached:false}` —— 绝不在打开页面时偷偷打上游。
+     */
+    /**
+     * 邀请码汇总：**全账号**，只读缓存（`quwork-invite-cache.json`）。
+     *
+     * 缓存形状：`{ updatedAt, accounts: { [key]: { inviteCode, invitedCount, points, quota, at } } }`
+     * 没有缓存的账号字段为 `null` —— 绝不在打开页面时偷偷打上游。
+     */
+    async summary() {
+      const cache = readJsonFile(inviteCacheFile())
+      /** @type {Record<string, any>} */
+      const cached = cache?.accounts ?? {}
+
+      const accounts = listKeys().map((key) => {
+        const c = cached[key] ?? null
+        return {
+          key,
+          accountId: accountIdOfKey(key),
+          inviteCode: c?.inviteCode ?? null,
+          invitedCount: c?.invitedCount ?? null,
+          points: c?.points ?? null,
+          quota: c?.quota ?? null,
+          at: c?.at ?? 0,
+        }
+      })
+
+      return { ok: true, cached: Boolean(cache), at: Number(cache?.updatedAt) || 0, updatedAt: Number(cache?.updatedAt) || 0, accounts }
+    },
+
+    /**
+     * 邀请码刷新：**只刷选中**（不传 keys = 全部），并发受 `accountsConcurrency` 限制。
+     *
+     * 每个账号用**自己的**平台 token；结果合并进缓存，不抹掉别人的。
+     */
+    async summaryRefresh(input) {
+      const keys = pickKeys(input)
+      if (keys.length === 0) return { ok: false, error: "没有可刷新的账号" }
+
+      const prev = readJsonFile(inviteCacheFile())?.accounts ?? {}
+      /** @type {Record<string, any>} */
+      const accounts = {}
+      let okCount = 0
+      let failed = 0
+
+      await runLimited(keys, concurrency(), async (key) => {
+        const token = tokenOfKey(key)
+        if (!token) {
+          accounts[key] = { ...(prev[key] ?? {}), at: now(), error: "没有平台 token" }
+          failed += 1
+          return
+        }
+        const r = await fetchInviteSummary({ platformBaseUrl, token, fetchImpl })
+        if (r.ok) {
+          accounts[key] = { inviteCode: r.inviteCode, invitedCount: r.invitedCount, points: r.points, quota: r.quota, at: now() }
+          okCount += 1
+        } else {
+          accounts[key] = { ...(prev[key] ?? {}), at: now(), error: r.message }
+          failed += 1
+        }
+      })
+
+      const stamp = now()
+      writeJsonFile(inviteCacheFile(), { updatedAt: stamp, accounts: { ...prev, ...accounts } })
+      return { ok: true, cached: false, at: stamp, updatedAt: stamp, okCount, failed, total: keys.length, accounts }
+    },
+
+    /** 设置：读。 */
+    async settings() {
+      return { ok: true, settings: { ...DEFAULT_SETTINGS, ...(readJsonFile(settingsFile()) ?? {}) }, path: settingsFile() }
+    },
+
+    /** 设置：写（只接受白名单字段，别让页面把任意键塞进文件）。 */
+    async settingsSave(input) {
+      const prev = readJsonFile(settingsFile()) ?? {}
+      /** @type {Record<string, any>} */
+      const next = { ...DEFAULT_SETTINGS, ...prev }
+      for (const k of Object.keys(DEFAULT_SETTINGS)) {
+        if (input && Object.prototype.hasOwnProperty.call(input, k)) next[k] = input[k]
+      }
+      writeJsonFile(settingsFile(), next)
+      return { ok: true, settings: next, path: settingsFile() }
+    },
+
+    /** 邀请记录「批量拉取」任务：立刻回 jobId，前端轮询进度。 */
+    async recordsBatchStart(input) {
+      const c = cred()
+      if (!c?.token) return { ok: false, error: "没有平台 token" }
+
+      const pages = Math.max(1, Math.min(20, Number(input?.pages) || 3))
+      const pageSize = Math.max(1, Math.min(50, Number(input?.pageSize) || 10))
+      const jobId = `rec-${now()}-${Math.random().toString(36).slice(2, 8)}`
+
+      const job = { jobId, running: true, done: 0, total: pages, list: [], error: "" }
+      jobs.set(jobId, job)
+
+      void (async () => {
+        for (let page = 1; page <= pages; page += 1) {
+          const r = await fetchInviteRecords({
+            platformBaseUrl,
+            token: c.token,
+            page,
+            pageSize,
+            fetchImpl,
+          })
+          if (!r.ok) {
+            job.error = r.message
+            break
+          }
+          job.list.push(...r.list)
+          job.done += 1
+          if (r.list.length < pageSize) break // 没有下一页了
+        }
+        job.running = false
+      })().catch((e) => {
+        job.error = String(e?.message ?? e).slice(0, 160)
+        job.running = false
+      })
+
+      return { ok: true, jobId, total: pages }
+    },
+
+    /** 邀请记录任务：查进度（`GET /api/job?jobId=`）。 */
+    async recordsBatchState(jobId) {
+      const job = jobs.get(String(jobId ?? ""))
+      if (!job) return { ok: false, error: "未知 jobId" }
+      return {
+        ok: true,
+        jobId: job.jobId,
+        running: job.running,
+        done: job.done,
+        total: job.total,
+        result: job.list,
+        error: job.error,
+      }
+    },
+
+/**
+     * 绑定邀请码：**指定账号**（用它的 token）。
+     *
+     * `key` 缺省时退化成「第一个账号」（兼容旧页面），但表格永远传 key。
+     */
+    async activate(input) {
+      const key = String(input?.key ?? "").trim() || listKeys()[0] || ""
+      const token = tokenOfKey(key)
+      if (!token) return { ok: false, error: "没有平台 token，无法绑定邀请码" }
+      return activateInvite({
+        platformBaseUrl,
+        token,
+        inviteCode: input?.inviteCode ?? input?.invite_code ?? "",
+        deviceIdentifier: deviceIdentifierFrom(),
+        fetchImpl,
+      })
+    },
+
+    /** 邀请记录：**同步分页**（表格直接翻页用；批量拉多页走 job）。 */
+    async records(input) {
+      const key = String(input?.key ?? "").trim() || listKeys()[0] || ""
+      const token = tokenOfKey(key)
+      if (!token) return { ok: false, error: "没有平台 token" }
+      const page = Math.max(1, Number(input?.page) || 1)
+      const size = Math.max(1, Math.min(50, Number(input?.size ?? input?.pageSize) || 10))
+
+      const r = await fetchInviteRecords({ platformBaseUrl, token, page, pageSize: size, fetchImpl })
+      if (!r.ok) return { ok: false, error: r.message }
+      // ⚠ 页码/页大小按**请求值**回显（上游有时会回 1；表格翻页要的是"我现在在第几页"）
+      return { ok: true, key, list: r.list, total: r.total, page, size }
+    },
+
+    /** 签到状态：**全账号**，只读缓存（`quwork-reward-cache.json`）。 */
+    async rewardStatus() {
+      const cache = readJsonFile(rewardCacheFile())
+      /** @type {Record<string, any>} */
+      const cached = cache?.accounts ?? {}
+
+      const accounts = listKeys().map((key) => {
+        const c = cached[key] ?? null
+        return {
+          key,
+          accountId: accountIdOfKey(key),
+          canClaim: c?.canClaim ?? null,
+          claimed: c?.claimed ?? null,
+          points: c?.points ?? null,
+          consecutiveDays: c?.consecutiveDays ?? null,
+          nextRefreshAt: c?.nextRefreshAt ?? null,
+          wechatRequired: c?.wechatRequired ?? null,
+          at: c?.at ?? 0,
+        }
+      })
+
+      return { ok: true, cached: Boolean(cache), at: Number(cache?.updatedAt) || 0, updatedAt: Number(cache?.updatedAt) || 0, accounts }
+    },
+
+    /** 签到状态刷新：**只刷选中**（每个账号用自己的 token，并发受限）。 */
+    async rewardStatusRefresh(input) {
+      const keys = pickKeys(input)
+      if (keys.length === 0) return { ok: false, error: "没有可刷新的账号" }
+
+      const prev = readJsonFile(rewardCacheFile())?.accounts ?? {}
+      /** @type {Record<string, any>} */
+      const accounts = {}
+      let okCount = 0
+      let failed = 0
+
+      await runLimited(keys, concurrency(), async (key) => {
+        const token = tokenOfKey(key)
+        if (!token) {
+          accounts[key] = { ...(prev[key] ?? {}), at: now(), error: "没有平台 token" }
+          failed += 1
+          return
+        }
+        const r = await fetchDailyRewardStatus({ platformBaseUrl, token, fetchImpl })
+        if (r.ok) {
+          accounts[key] = {
+            canClaim: r.canClaim,
+            claimed: r.claimed,
+            consecutiveDays: r.consecutiveDays,
+            nextRefreshAt: r.nextRefreshAt,
+            wechatRequired: r.wechatRequired,
+            points: r.points ?? prev[key]?.points ?? null,
+            at: now(),
+          }
+          okCount += 1
+        } else {
+          accounts[key] = { ...(prev[key] ?? {}), at: now(), error: r.message }
+          failed += 1
+        }
+      })
+
+      const stamp = now()
+      writeJsonFile(rewardCacheFile(), { updatedAt: stamp, accounts: { ...prev, ...accounts } })
+      return { ok: true, cached: false, at: stamp, updatedAt: stamp, okCount, failed, total: keys.length, accounts }
+    },
+
+    /** 签到：**指定账号**。 */
+    async rewardClaim(input) {
+      const key = String(input?.key ?? "").trim() || listKeys()[0] || ""
+      const token = tokenOfKey(key)
+      if (!token) return { ok: false, error: "没有平台 token" }
+
+      const r = await claimDailyReward({ platformBaseUrl, token, fetchImpl })
+      if (!r.ok) return { ok: false, error: r.message, key }
+
+      // 顺手把这条缓存更新（签完就是「已签」）
+      const prev = readJsonFile(rewardCacheFile())
+      const accounts = { ...(prev?.accounts ?? {}) }
+      accounts[key] = {
+        ...(accounts[key] ?? {}),
+        claimed: true,
+        canClaim: false,
+        consecutiveDays: r.consecutiveDays,
+        points: r.points ?? accounts[key]?.points ?? null,
+        at: now(),
+      }
+      writeJsonFile(rewardCacheFile(), { updatedAt: now(), accounts })
+
+      return { ...r, key }
+    },
+
+    /** 月月送：**指定账号**（不缓存，页面点一次读一次）。 */
+    async gifts(input) {
+      const key = String(input?.key ?? "").trim() || listKeys()[0] || ""
+      const token = tokenOfKey(key)
+      if (!token) return { ok: false, error: "没有平台 token" }
+      const r = await fetchMonthlyGifts({ platformBaseUrl, token, fetchImpl })
+      return { ...r, key }
+    },
+
+    /** 权益兑换：**指定账号**。 */
+    async redeem(input) {
+      const key = String(input?.key ?? "").trim() || listKeys()[0] || ""
+      const token = tokenOfKey(key)
+      if (!token) return { ok: false, error: "没有平台 token" }
+      return redeemBenefit({ platformBaseUrl, token, orderId: input?.orderId, fetchImpl })
+    },
+
+    /**
+     * 微信绑定 · 第一步：生成 state 并给出授权页 URL。
+     *
+     * ⚠ 不打开浏览器（服务端不碰 UI）；由页面拿 `url` 交给 `openExternal`。
+     */
+    async wechatStart(input) {
+      const key = String(input?.key ?? "").trim() || listKeys()[0] || ""
+      if (!key) return { ok: false, error: "没有账号" }
+
+      const state = newState()
+      wechatStates.set(state, { key, at: now() })
+
+      // 顺手清掉过期的（表小，全扫一遍即可）
+      for (const [s, v] of wechatStates) {
+        if (now() - v.at > WECHAT_STATE_TTL_MS) wechatStates.delete(s)
+      }
+
+      return { ok: true, key, state, url: buildAuthorizeUrl({ state }) }
+    },
+
+    /**
+     * 微信绑定 · 第二步：解析回调地址 → 换 wechat_token → 绑定。
+     *
+     * 三道校验都属于「不打上游就必须拒绝」的：
+     *   ① 地址里必须有 code
+     *   ② state 必须是我们发过的
+     *   ③ state 未过期；用后即焚（无论成败都删，防止重放）
+     */
+    async wechatFinish(input) {
+      const key = String(input?.key ?? "").trim() || listKeys()[0] || ""
+      const { code, state } = parseCallback(input?.callbackUrl ?? input?.url ?? "")
+
+      if (!code) return { ok: false, error: "回调地址里没有 code，请把浏览器地址栏整段粘进来" }
+
+      const issued = wechatStates.get(state)
+      if (!issued) return { ok: false, error: "state 不匹配（可能不是本面板发起的，或已用过），请重新扫码" }
+      if (now() - issued.at > WECHAT_STATE_TTL_MS) {
+        wechatStates.delete(state)
+        return { ok: false, error: "state 已过期（10 分钟），请重新扫码" }
+      }
+      wechatStates.delete(state) // 用后即焚
+
+      const token = tokenOfKey(key || issued.key)
+      if (!token) return { ok: false, error: "没有平台 token，无法绑定微信" }
+
+      const ex = await exchangeCode({ code, state, platformBaseUrl, fetchImpl })
+      if (!ex.ok) return { ok: false, error: ex.message }
+
+      const r = await bindWechat({ platformBaseUrl, token, wechatToken: ex.wechatToken, fetchImpl })
+      if (!r.ok) return { ok: false, error: r.message }
+
+      // 绑定成功后把该账号的签到缓存标成「不再是需绑微信」
+      const prev = readJsonFile(rewardCacheFile())
+      if (prev?.accounts?.[key || issued.key]) {
+        const accounts = { ...prev.accounts }
+        accounts[key || issued.key] = { ...accounts[key || issued.key], wechatRequired: false, at: now() }
+        writeJsonFile(rewardCacheFile(), { updatedAt: now(), accounts })
+      }
+
+      return { ok: true, key: key || issued.key, message: r.message || "绑定成功" }
+    },
+  }
+
+  return createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1")
+    const path = url.pathname
+    // HEAD 走与 GET 相同的路由，只是不发 body（`curl -I` 也能答）
+    const isHead = req.method === "HEAD"
+    const isGet = req.method === "GET" || isHead
+    /** 这个请求要不要带 PNA 头（Chrome 从 file:// 访问本机会先问）。 */
+    const pna = req.headers["access-control-request-private-network"] === "true"
+    const json = (status, obj) => sendJson(res, status, obj, { head: isHead, pna })
+
+    try {
+      // ── CORS 预检：直接 204，不碰任何业务逻辑 ──
+      if (req.method === "OPTIONS") {
+        res.writeHead(204, { ...corsHeaders(pna), "cache-control": "no-store" })
+        return res.end()
+      }
+
+      // ── 静态资源（打开页面时**零上游请求**）──
+      if (isGet && (path === "/" || path === "/index.html")) {
+        return sendFile(res, join(PAGE_DIR, "index.html"), { head: isHead, pna })
+      }
+      if (isGet && path.startsWith("/assets/")) {
+        const safe = path.replace(/^\/assets\//, "").replace(/\.\./g, "")
+        return sendFile(res, join(PAGE_DIR, "assets", safe), { head: isHead, pna })
+      }
+
+      // ── API（只有点按钮才走到这里）──
+      if (isGet && path.startsWith("/api/")) {
+        // GET/HEAD 只服务**只读**的东西：job 进度、设置、账号列表（都读文件/内存，不打上游）
+        const name = path.slice("/api/".length)
+        if (name === "job") return json(200, await api.recordsBatchState(url.searchParams.get("jobId")))
+        if (name === "accounts") return json(200, await api.accounts())
+        if (name === "invite/records") {
+          return json(
+            200,
+            await api.records({
+              key: url.searchParams.get("key"),
+              page: url.searchParams.get("page"),
+              size: url.searchParams.get("size"),
+            }),
+          )
+        }
+        if (name === "invite/summary") return json(200, await api.summary())
+        if (name === "reward/status") return json(200, await api.rewardStatus())
+        if (name === "reward/gifts") return json(200, await api.gifts({ key: url.searchParams.get("key") }))
+        if (name === "settings") return json(200, await api.settings())
+        return json(404, { ok: false, error: "未知接口" })
+      }
+
+      if (req.method === "POST" && path.startsWith("/api/")) {
+        const name = path.slice("/api/".length)
+        /** @type {Record<string, (i: any) => any>} */
+        const table = {
+          accounts: () => api.accounts(),
+          "accounts/refresh": (i) => api.accountsRefresh(i),
+          "accounts/delete": (i) => api.accountsDelete(i),
+          settings: (i) => api.settingsSave(i),
+          "invite/summary": () => api.summary(),
+          "invite/refresh": (i) => api.summaryRefresh(i),
+          "invite/activate": (i) => api.activate(i),
+          "invite/records": (i) => api.recordsBatchStart(i),
+          "reward/status": () => api.rewardStatus(),
+          "reward/status/refresh": (i) => api.rewardStatusRefresh(i),
+          "reward/claim": (i) => api.rewardClaim(i),
+          "reward/gifts": (i) => api.gifts(i),
+          "benefit/monthly-gifts": (i) => api.gifts(i),
+          "benefit/redeem": (i) => api.redeem(i),
+          "wechat/start": (i) => api.wechatStart(i),
+          "wechat/finish": (i) => api.wechatFinish(i),
+        }
+        const fn = table[name]
+        if (!fn) return json(404, { ok: false, error: "未知接口" })
+
+        let input = {}
+        try {
+          const raw = await readBody(req)
+          input = raw ? JSON.parse(raw) : {}
+        } catch {
+          input = {}
+        }
+        const out = await fn(input)
+        return json(200, out)
+      }
+
+      // ── SPA 兜底：非 /api、非 /assets 的未知路径 → 面板 HTML ──
+      //
+      // magpie 可能用「带前缀」的 URL 打开面板（代理路径），此时 `/p/quwork/`
+      // 这类路径必须仍然拿到面板，而不是 404。
+      if (isGet) return sendFile(res, join(PAGE_DIR, "index.html"), { head: isHead, pna })
+
+      return json(404, { ok: false, error: "not found" })
+    } catch (e) {
+      log?.warn?.(`quwork panel: 请求失败: ${String(e?.message ?? e).slice(0, 160)}`)
+      return json(500, { ok: false, error: "内部错误" })
+    }
+  })
+}
+
+/** CORS 头；请求带 PNA 时额外回 allow-private-network（Chrome 预检要求）。 */
+function corsHeaders(pna) {
+  return pna ? { ...CORS, "Access-Control-Allow-Private-Network": "true" } : { ...CORS }
+}
+
+/**
+ * 发静态文件（带 CORS；HEAD 只发头）。
+ *
+ * @param {import("node:http").ServerResponse} res
+ * @param {string} file
+ * @param {{head?: boolean, pna?: boolean}} [opts]
+ */
+function sendFile(res, file, opts = {}) {
+  if (!existsSync(file)) {
+    res.writeHead(404, { ...corsHeaders(opts.pna), "content-type": "text/plain; charset=utf-8" })
+    res.end(opts.head ? undefined : "not found")
+    return
+  }
+  const ext = file.slice(file.lastIndexOf("."))
+  const buf = readFileSync(file)
+  res.writeHead(200, {
+    ...corsHeaders(opts.pna),
+    "content-type": MIME[ext] ?? "application/octet-stream",
+    "cache-control": "no-store",
+    "content-length": String(buf.length),
+  })
+  res.end(opts.head ? undefined : buf)
+}
+
+/**
+ * 面板服务的**宿主侧**：自己 listen（magpie 只负责把 options 传进来）。
+ *
+ * @param {{client?: any, directory?: string}} [input]
+ * @param {{port?: number, configDir?: string, platformBaseUrl?: string, fetchImpl?: typeof fetch,
+ *   credential?: any}} [options]
+ * @returns {Promise<{ok: boolean, port: number, close: () => Promise<void>, reason?: string}>}
+ */
+export const QuWorkPage = async (input = {}, options = {}) => {
+  const configDir = String(input?.directory ?? options?.configDir ?? "").trim()
+  // 端口：options.port → $PAGESVC_PORT → 4392；被占则回退（4392→4393→4394）
+  const want = resolvePort(options, globalThis.process?.env, 4392) || 4392
+  const startPort = Number(options?.port) > 0 ? Number(options.port) : want
+
+  const chosen = await pickPort({ start: startPort, max: 3, isFree: options?.isFree })
+  if (!chosen) {
+    return { ok: false, port: 0, close: async () => {}, reason: `${startPort}~${startPort + 2} 都被占用` }
+  }
+
+  const server = createPageServer({
+    configDir,
+    platformBaseUrl: options?.platformBaseUrl,
+    log: input?.client?.app?.log ? { warn: (m) => input.client.app.log({ body: { service: "quwork", level: "warn", message: m } }) } : console,
+    fetchImpl: options?.fetchImpl,
+    credential: options?.credential,
+  })
+
+  return new Promise((resolve) => {
+    server.once("error", (err) => {
+      resolve({ ok: false, port: 0, close: async () => {}, reason: String(err?.message ?? err) })
+    })
+    server.listen(chosen, "127.0.0.1", () => {
+      const addr = server.address()
+      const port = typeof addr === "object" && addr ? addr.port : chosen
+
+      // 把**最终**端口写进设置（页面标题旁会显示它，下次启动也读它）
+      if (configDir) {
+        const file = join(configDir, "quwork-panel-settings.json")
+        const prev = readJsonFile(file) ?? {}
+        writeJsonFile(file, { ...DEFAULT_SETTINGS, ...prev, port })
+      }
+
+      resolve({
+        ok: true,
+        port,
+        close: () => new Promise((done) => server.close(() => done())),
+      })
+    })
+  })
+}

@@ -277,7 +277,7 @@ test("parseSessionFromSqlite：能从字节里取出 llmToken/accessToken/expire
   assert.equal(s.accessToken, PLATFORM)
   assert.equal(s.expiresAt, 1_800_000_000_000)
 
-  assert.deepEqual(parseSessionFromSqlite("no session here"), { llmToken: "", accessToken: "", expiresAt: 0 })
+  assert.deepEqual(parseSessionFromSqlite("no session here"), { llmToken: "", accessToken: "", expiresAt: 0, updatedAt: 0 })
 })
 
 test("readLocalCredential：yaml 兜底读 QURIVS_LLM_API_KEY；两处都没有 → failed", () => {

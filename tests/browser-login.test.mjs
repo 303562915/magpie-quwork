@@ -47,68 +47,68 @@ const noClient = {
   readRegistry: () => "",
 }
 
-// ── A) authorize 启动客户端 ────────────────────────────────────────────
+// ── A) authorize 打开**浏览器**（T-17：用户明确不要客户端）──────────
 
-test("1) 命中客户端 exe → 启动它（spawn 一次、参数是那个 exe），url 为空", async () => {
-  /** @type {Array<{cmd: string, argv: any[]}>} */
+test("1) authorize 用系统浏览器打开 quwork.cn，返回 {method:\"other\", url}", async () => {
+  /** @type {string[]} */
+  const opened = []
+  /** @type {Array<{cmd: string}>} */
   const spawned = []
   const m = await loginMethod({
-    clientPath: FAKE_EXE,
-    exists: (p) => p === FAKE_EXE,
-    readRegistry: () => "",
-    spawn: (cmd, argv) => {
-      spawned.push({ cmd, argv })
+    openExternal: async (u) => opened.push(String(u)),
+    spawn: (cmd) => {
+      spawned.push({ cmd })
       return { unref() {}, on() {} }
     },
   })
 
   const r = await m.authorize({})
 
-  assert.equal(spawned.length, 1, "必须真的启动一次客户端")
-  assert.equal(spawned[0].cmd, FAKE_EXE)
+  assert.equal(opened.length, 1, "必须真的打开一次浏览器")
+  assert.equal(opened[0], "https://quwork.cn/")
+  assert.equal(r.url, "https://quwork.cn/", "url 也要交给 magpie")
   assert.equal(r.method, "other")
-  assert.equal(r.url, "", "客户端场景不给 url —— 否则 magpie 会再开一个网页")
   assert.equal(typeof r.callback, "function")
-  assert.match(String(r.instructions), /客户端/)
+  assert.match(String(r.instructions), /浏览器|quwork\.cn/)
+  assert.equal(spawned.length, 0, "不许再启动任何 exe")
 })
 
-test("2) 找不到客户端 → 退化成网页：url 非空，且 openExternal 收到该 url", async () => {
+test("2) loginUrl 可覆盖；openExternal 抛错时 authorize 仍返回 url", async () => {
   /** @type {string[]} */
   const opened = []
   const m = await loginMethod({
-    ...noClient,
+    loginUrl: "https://example.test/login",
     openExternal: async (u) => opened.push(String(u)),
   })
+  const r = await m.authorize()
+  assert.equal(r.url, "https://example.test/login")
+  assert.equal(opened[0], "https://example.test/login")
 
-  const r = await m.authorize({})
-
-  assert.equal(r.method, "other")
-  assert.ok(String(r.url).startsWith("https://"), `网页退路要给 url: ${JSON.stringify(r.url)}`)
-  assert.equal(opened[0], r.url, "openExternal 应该打开同一个 url")
+  const m2 = await loginMethod({
+    openExternal: async () => {
+      throw new Error("no browser")
+    },
+  })
+  const r2 = await m2.authorize()
+  assert.equal(r2.method, "other")
+  assert.ok(String(r2.url).startsWith("https://"), "打不开也要把 url 交回")
 })
 
-test("3) 启动失败（spawn 抛错）→ authorize 仍返回，info 有 warn", async () => {
+test("3) 打开失败只 warn（有 log 对象时）", async () => {
   /** @type {string[]} */
   const warns = []
   const p = await QuWorkAuthPlugin(
     {},
     {
       log: { warn: (m) => warns.push(String(m)) },
-      clientPath: FAKE_EXE,
-      exists: () => true,
-      readRegistry: () => "",
-      spawn: () => {
-        throw new Error("spawn denied")
-      },
       openExternal: async () => {},
     },
   )
   const m = p.auth.methods.find((x) => /客户端|浏览器/.test(String(x.label)))
-  const r = await m.authorize({})
+  const r = await m.authorize()
 
   assert.equal(r.method, "other")
   assert.equal(typeof r.callback, "function")
-  assert.ok(warns.length > 0, "启动失败要留一条 warn")
 })
 
 // ── D) callback 轮询抓取 ───────────────────────────────────────────────
@@ -267,4 +267,142 @@ test("9) pollIntervalMs / sleep / pollMs 可注入（不真等）", async () => 
   assert.equal(r.type, "failed")
   assert.ok(sleeps.length > 0, "应当进入轮询")
   assert.ok(sleeps.every((ms) => ms === 7), `sleep 应收到注入的间隔，实际: ${sleeps.join(",")}`)
+})
+// ── T-14 「新登录」多判据（真机：服务端会**复用同一个 llmToken**）───────
+//
+// 真机实测：用户在客户端登录后 sqlite 从 4 KB → 45 KB、session_json 里出现
+// llmToken，但 **token 与登录前完全相同**。只比 token 字符串 ⇒ 永远超时。
+//
+// 所以「新」是四选一：token 变 / 会话更新时间变新 / 来源文件 mtime 变新 /
+// 首次出现平台 token。
+
+test("10) token 相同但 sessionUpdatedAt 变新 → 判为新登录", async () => {
+  /** @type {any[]} */
+  const queue = [
+    { ok: true, llmToken: OLD_LLM, sessionUpdatedAt: 1000, fileMtime: 1000 },
+    { ok: true, llmToken: OLD_LLM, sessionUpdatedAt: 2000, fileMtime: 1000 },
+  ]
+  let reads = 0
+  let clock = 0
+  const m = await loginMethod({
+    ...noClient,
+    openExternal: async () => {},
+    pollIntervalMs: 1,
+    sleep: async (ms) => {
+      clock += ms
+    },
+    now: () => clock,
+    readLocal: () => {
+      const v = queue[Math.min(reads, queue.length - 1)]
+      reads += 1
+      return v
+    },
+  })
+
+  const r = await m.callback(undefined, {})
+  assert.equal(r.type, "success", "会话更新时间变新就该算登录过")
+  assert.equal(r.access, OLD_LLM)
+})
+
+test('11) token 相同但 fileMtime 变新 → 判为新登录', async () => {
+  /** @type {any[]} */
+  const queue = [
+    { ok: true, llmToken: OLD_LLM, sessionUpdatedAt: 1000, fileMtime: 1000 },
+    { ok: true, llmToken: OLD_LLM, sessionUpdatedAt: 1000, fileMtime: 5000 },
+  ]
+  let reads = 0
+  let clock = 0
+  const m = await loginMethod({
+    ...noClient,
+    openExternal: async () => {},
+    pollIntervalMs: 1,
+    sleep: async (ms) => {
+      clock += ms
+    },
+    now: () => clock,
+    readLocal: () => {
+      const v = queue[Math.min(reads, queue.length - 1)]
+      reads += 1
+      return v
+    },
+  })
+
+  const r = await m.callback(undefined, {})
+  assert.equal(r.type, "success", "来源文件 mtime 变新也该算登录过")
+})
+
+test("12) token/时间/mtime 都相同，但首次出现平台 token → 判为新登录", async () => {
+  /** @type {any[]} */
+  const queue = [
+    { ok: true, llmToken: OLD_LLM, sessionUpdatedAt: 1000, fileMtime: 1000, hasPlatformToken: false },
+    { ok: true, llmToken: OLD_LLM, sessionUpdatedAt: 1000, fileMtime: 1000, hasPlatformToken: true, token: PLATFORM },
+  ]
+  let reads = 0
+  let clock = 0
+  const m = await loginMethod({
+    ...noClient,
+    openExternal: async () => {},
+    pollIntervalMs: 1,
+    sleep: async (ms) => {
+      clock += ms
+    },
+    now: () => clock,
+    readLocal: () => {
+      const v = queue[Math.min(reads, queue.length - 1)]
+      reads += 1
+      return v
+    },
+  })
+
+  const r = await m.callback(undefined, {})
+  assert.equal(r.type, "success", "平台 token 首次出现也算登录完成")
+  assert.equal(r.refresh, PLATFORM)
+})
+
+test("13) 全部判据都与 baseline 相同 → 继续轮询直到超时（failed）", async () => {
+  let clock = 0
+  const same = { ok: true, llmToken: OLD_LLM, sessionUpdatedAt: 1000, fileMtime: 1000, hasPlatformToken: false }
+  const m = await loginMethod({
+    ...noClient,
+    openExternal: async () => {},
+    pollIntervalMs: 1,
+    pollMs: 5,
+    sleep: async (ms) => {
+      clock += ms
+    },
+    now: () => clock,
+    readLocal: () => same,
+  })
+
+  const r = await m.callback(undefined, {})
+  assert.equal(r.type, "failed")
+  assert.match(String(r.error), /3 分钟内没检测到新的登录状态/)
+})
+
+test("14) token 变化（原有判据）仍 success（回归）", async () => {
+  /** @type {any[]} */
+  const queue = [
+    { ok: true, llmToken: OLD_LLM, sessionUpdatedAt: 1000, fileMtime: 1000 },
+    { ok: true, llmToken: NEW_LLM, sessionUpdatedAt: 1000, fileMtime: 1000 },
+  ]
+  let reads = 0
+  let clock = 0
+  const m = await loginMethod({
+    ...noClient,
+    openExternal: async () => {},
+    pollIntervalMs: 1,
+    sleep: async (ms) => {
+      clock += ms
+    },
+    now: () => clock,
+    readLocal: () => {
+      const v = queue[Math.min(reads, queue.length - 1)]
+      reads += 1
+      return v
+    },
+  })
+
+  const r = await m.callback(undefined, {})
+  assert.equal(r.type, "success")
+  assert.equal(r.access, NEW_LLM)
 })

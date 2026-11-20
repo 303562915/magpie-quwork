@@ -32,9 +32,11 @@ import { makeRefresher } from "./src/refresh.mjs"
 import { upsertAccount } from "./src/auth-store.mjs"
 import { PHONE_RE, CODE_RE, deviceIdentifierFrom, sendVerifyCode, loginWithCode, isCodeError } from "./src/login.mjs"
 import { readLocalCredential, pollForNewCredential } from "./src/browser-login.mjs"
-import { makeLaunchLoginSource } from "./src/launch-client.mjs"
+import { WEB_LOGIN_URL } from "./src/launch-client.mjs"
 import { defaultOpenExternal } from "./src/open-url.mjs"
 import { compact, accountIdOf } from "./src/identity.mjs"
+import { ICON } from "./src/icon.mjs"
+import { claimDailyReward, fetchDailyRewardStatus } from "./src/invite.mjs"
 
 /** `config` 钩子：只描述供应商本身，不发请求。 */
 function makeConfigHook(opts = {}) {
@@ -89,15 +91,12 @@ function makeMethods(opts = {}) {
   const readLocal = typeof opts.readLocal === "function" ? opts.readLocal : () => readLocalCredential()
   const configDir = String(opts.configDir ?? "").trim()
 
-  // ── 打开登录入口（客户端优先 / 网页兜底）+ 轮询参数（都可注入）──
-  const launchLoginSource = makeLaunchLoginSource({
-    clientPath: opts.clientPath,
-    exists: opts.exists,
-    spawnImpl: opts.spawn,
-    readRegistry: opts.readRegistry,
-    openExternal: typeof opts.openExternal === "function" ? opts.openExternal : defaultOpenExternal,
-    log,
-  })
+  // ── 浏览器登录页 + 打开器 + 轮询参数（都可注入）──
+  //
+  // 用户明确不要客户端：点一下就用系统浏览器打开 quwork.cn（网页版自带完整登录），
+  // 登录后 token 落在浏览器存储里，由 readLocalCredential 的浏览器 profile 来源读出。
+  const openExternal = typeof opts.openExternal === "function" ? opts.openExternal : defaultOpenExternal
+  const loginUrl = String(opts.loginUrl ?? "").trim() || WEB_LOGIN_URL
   const pollMs = Number.isFinite(opts.pollMs) ? Number(opts.pollMs) : 180_000
   const pollIntervalMs = Number.isFinite(opts.pollIntervalMs) ? Number(opts.pollIntervalMs) : 3000
   /** @type {((ms: number) => Promise<void>) | undefined} */
@@ -235,33 +234,31 @@ function makeMethods(opts = {}) {
     return successOf(r, phone, { uid, phone })
   }
 
-  /* ── ② 打开登录入口（QuWork 客户端优先）+ 轮询抓取 ──────────────── */
+  /* ── ② 打开浏览器登录（网页版）+ 轮询抓取 ──────────────────────── */
 
   const browserMethod = {
     type: "oauth",
-    label: "打开 QuWork 客户端登录（自动抓取）",
-    labels: { en: "launch QuWork client and capture the session" },
+    label: "打开浏览器登录（自动抓取）",
+    labels: { en: "open quwork.cn in a browser and capture the token" },
     // 同 sms：方法级也挂一份（两种取法都兼容）
     callback: browserCallback,
     /**
-     * 点一下就打开**能产生凭据的那个东西**：
+     * 点一下就**用系统浏览器打开 quwork.cn**（网页版自带完整登录）。
      *
-     *	① QuWork 桌面客户端（`llm_token` 只有它会写进 sqlite / credentials.yaml）
-     *	② 找不到客户端才退化成网页登录页
-     *
-     * ⚠ 立刻返回（谁都不等）；真正的等待在 `callback` 里的轮询。
+     * 登录完成后 token 落在浏览器存储里，`callback` 轮询读出来。
+     * ⚠ 立刻返回（沉默等待在 `callback`）；打开失败只 warn，仍把 url 交给 magpie。
      */
-    async authorize(inputs, { signal } = {}) {
-      const how = await launchLoginSource()
-      // 客户端场景**不给 url**：给了 magpie 会再开一个网页，用户会以为要登录两次
+    async authorize() {
+      try {
+        await openExternal(loginUrl)
+      } catch {
+        /* 打不开也让 magpie 拿着 url 自己开 */
+      }
       return {
-        url: how?.kind === "browser" ? String(how.target ?? "") : "",
+        url: loginUrl,
         method: "other",
         callback: browserCallback,
-        instructions:
-          how?.kind === "client"
-            ? "已启动 QuWork 客户端，请在客户端里完成登录（手机号 / 微信），登录完成后这里会自动继续"
-            : "已在浏览器打开登录页，完成后这里会自动继续",
+        instructions: "已在浏览器打开 quwork.cn，登录完成后这里会自动继续",
       }
     },
   }
@@ -269,19 +266,20 @@ function makeMethods(opts = {}) {
   /**
    * 轮询抓取新凭据。
    *
-   * # 为什么先快照基准
+   * # 为什么先快照**完整**基准（不是只取 token 字符串）
    *
-   * 本机可能**已经**有上次登录留下的旧凭据。不比对的话第一次读就「成功」，
-   * 用户拿到的其实是旧账号。所以进入时快照旧值，只接受 ≠ 旧值
-   * （旧值本来为空则任意非空都算新）。
+   * 真机实测：用户在客户端登录后 **token 可能与登录前完全相同**（服务端复用同一个
+   * sk- token）。只比字符串会把「真的登录了」判成「没变化」⇒ 永远超时。
+   * 所以快照整份凭据（含 `sessionUpdatedAt` / `fileMtime` / `hasPlatformToken`），
+   * 交给 `isNewCredential()` 做四判据。
    */
   async function browserCallback(_input, { signal } = {}) {
-    let baseline = ""
+    /** @type {any} */
+    let baseline = {}
     try {
-      const first = readLocal()
-      baseline = String(first?.llmToken ?? "").trim()
+      baseline = readLocal() ?? {}
     } catch {
-      baseline = ""
+      baseline = {}
     }
 
     const polled = await pollForNewCredential({
@@ -370,10 +368,14 @@ export const QuWorkAuthPlugin = async (input = {}, options = {}) => {
   // 续期器：loader 每条对话请求后 `void` 调一次（节流 60s，失败只 log）
   const refresh = makeRefresher({ configDir, log, platformBaseUrl })
 
-  return {
+  /** @type {any} */
+  const result = {
     config: makeConfigHook({ modelBaseUrl }),
     auth: {
       provider: PROVIDER,
+      // ⚠ magpie 的 `iconOf()` 读的是 **`auth.icon`**（不是插件顶层 icon），
+      // 且要求 `^data:image/` 前缀、≤3MB。少写这一处 = 界面上永远换不了图标。
+      ...(ICON ? { icon: ICON } : {}),
       methods: makeMethods({
         platformBaseUrl,
         configDir,
@@ -381,12 +383,9 @@ export const QuWorkAuthPlugin = async (input = {}, options = {}) => {
         // 测试/排障注入点（生产不传 = 用全局 fetch 与本机读取）
         fetchImpl: typeof options?.fetchImpl === "function" ? options.fetchImpl : undefined,
         readLocal: typeof options?.readLocal === "function" ? options.readLocal : undefined,
-        // 打开登录入口 / 轮询：全部可注入（生产不传 = 真启动客户端、真轮询 3 分钟）
-        clientPath: options?.clientPath,
+        // 浏览器登录 / 轮询：全部可注入（生产不传 = 真开浏览器、真轮询 3 分钟）
+        loginUrl: options?.loginUrl,
         openExternal: typeof options?.openExternal === "function" ? options.openExternal : undefined,
-        exists: typeof options?.exists === "function" ? options.exists : undefined,
-        spawn: typeof options?.spawn === "function" ? options.spawn : undefined,
-        readRegistry: typeof options?.readRegistry === "function" ? options.readRegistry : undefined,
         pollMs: options?.pollMs,
         pollIntervalMs: options?.pollIntervalMs,
         sleep: typeof options?.sleep === "function" ? options.sleep : undefined,
@@ -394,12 +393,59 @@ export const QuWorkAuthPlugin = async (input = {}, options = {}) => {
       }),
       loader: makeLoaderHook({ modelBaseUrl, log, refresh, bodyMode }),
       usage: makeUsageHook({ platformBaseUrl, log }),
+      /**
+       * `auth.checkin`：magpie 自己的签到钩子（OpenCode 忽略）。
+       *
+       * 上游签到是 `/api/user/daily-reward/claim`（需要平台 token）。
+       * ⚠ 不写 `error`：拿不到/不能签就如实说，别让 magpie 把账号判失效。
+       */
+      checkin: async (getAuth) => {
+        const auth = await getAuth()
+        const token = String(auth?.token ?? auth?.refresh ?? "").trim()
+        if (!token) return { ok: false, message: "没有平台 token，无法签到" }
+
+        const status = await fetchDailyRewardStatus({ platformBaseUrl, token, fetchImpl: options?.fetchImpl })
+        if (status.ok && status.claimed) {
+          return { ok: false, message: `今天已经签过了（连续 ${status.consecutiveDays} 天）` }
+        }
+        if (status.ok && status.wechatRequired) {
+          return { ok: false, message: "该账号签到需要先绑定微信" }
+        }
+
+        const r = await claimDailyReward({ platformBaseUrl, token, fetchImpl: options?.fetchImpl })
+        if (!r.ok) return { ok: false, message: r.message }
+        return { ok: true, message: `签到成功：+${r.granted} 积分（连续 ${r.consecutiveDays} 天）`, points: r.points }
+      },
     },
     provider: {
       id: PROVIDER,
       models: makeModelsHook({ modelBaseUrl, log }),
     },
   }
+
+  // 官方图标同时挂在顶层（排障用；magpie 真正读的是 `auth.icon`，见上）
+  if (ICON) result.icon = ICON
+
+  return result
+}
+
+/**
+ * 面板服务的**宿主侧**：为 QuWork 面板跑一个本地 HTTP 服务。
+ *
+ * # 为什么必须是一个独立具名导出
+ *
+ * magpie 把入口模块的**每个具名导出**都当插件调用，并把它自己解析出的 options
+ * （含 `port`）传进来。服务在这个函数里 `listen`，magpie 不代劳。
+ *
+ * ⚠ 动态 import：页面服务只在 magpie 真要它时才加载（`serve` 场景）。
+ *   静态 import 会让 `node --test` 每次也拉起 server.mjs 的全部依赖。
+ *
+ * @param {{client?: any, directory?: string}} [input]
+ * @param {object} [options]
+ */
+export const QuWorkPage = async (input = {}, options = {}) => {
+  const { QuWorkPage: serve } = await import("./server.mjs")
+  return serve(input, options)
 }
 
 /**

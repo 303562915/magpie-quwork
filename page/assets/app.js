@@ -1,0 +1,891 @@
+// app.js QuWork 面板交互（纯原生，无框架）。
+//
+// # 一条铁律
+//
+// **打开页面不发任何上游请求**：只调 `GET /api/accounts`、`GET /api/invite/summary`、
+// `GET /api/settings`（都只读文件/内存）并渲染缓存。所有上游调用都由按钮触发。
+
+const $ = (id) => document.getElementById(id)
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c])
+const fmtNum = (n) => (n == null || n === "" ? "—" : Number(n).toLocaleString("zh-CN"))
+const fmtTime = (sec) => {
+  const n = Number(sec) || 0
+  if (!n) return "—"
+  const ms = n < 1e11 ? n * 1000 : n
+  const d = new Date(ms)
+  if (Number.isNaN(d.getTime())) return "—"
+  const p = (x) => String(x).padStart(2, "0")
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+const fmtAgo = (ms) => {
+  const t = Number(ms) || 0
+  if (!t) return "无缓存"
+  const diff = Math.max(0, Date.now() - t)
+  if (diff < 60_000) return "刚刚"
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`
+  return `${Math.floor(diff / 86_400_000)} 天前`
+}
+/** 剩余天数（负数 = 已过期）。 */
+const daysLeft = (sec) => {
+  const n = Number(sec) || 0
+  if (!n) return null
+  return Math.floor((n * 1000 - Date.now()) / 86_400_000)
+}
+
+/**
+ * 面板服务的 origin。
+ *
+ * # 为什么不能直接用相对路径（真机踩过）
+ *
+ * magpie 打开面板时，页面**不一定**由 `127.0.0.1:<port>` 提供：带路页/宿主 origin/
+ * `file:` 都可能。相对路径 `fetch("/api/...")` 于是打到**页面所在 origin**，
+ * 得到 404 → `api()` 抛错 → 表格永远停在「加载中…」。
+ *
+ * 所以照 magpie-loomy 的做法：从**脚本自身 URL** 取 origin（`<script src>` 由面板
+ * 服务发出，origin 就是它）。另外支持 `?port=`（boot.js 跳转时带上）作为更稳的来源，
+ * 最后才退化成同源 / 本机默认端口。
+ */
+const BASE = (() => {
+  // ① boot.js 跳转时带的 ?port=（最可靠：服务自己写的端口）
+  try {
+    const p = Number(new URLSearchParams(location.search).get("port"))
+    if (Number.isInteger(p) && p > 0 && p < 65536) return `http://127.0.0.1:${p}`
+  } catch {
+    /* 忽略 */
+  }
+  // ② 脚本自身 URL 的 origin（loomy 的做法）
+  try {
+    const src = document.currentScript?.src
+    if (src && /^https?:/.test(src)) return new URL(src).origin
+  } catch {
+    /* 忽略 */
+  }
+  // ③ 同源（由面板服务提供时）→ ④ 本机默认端口
+  return location.origin && location.origin !== "null" ? location.origin : "http://127.0.0.1:4392"
+})()
+
+/**
+ * 单次请求（一个 base）。
+ *
+ * @param {string} base
+ * @param {string} path
+ * @param {RequestInit} init
+ */
+async function apiOnce(base, path, init) {
+  let resp
+  try {
+    resp = await fetch(base + path, init)
+  } catch (e) {
+    throw new Error(`无法连接面板服务（${base}）：${String(e?.message ?? e).slice(0, 80)}`)
+  }
+  const data = await resp.json().catch(() => null)
+  if (!data || typeof data !== "object") throw new Error(`服务返回了无法解析的数据（HTTP ${resp.status}）`)
+  if (!resp.ok) throw new Error(data.error || data.message || `HTTP ${resp.status}`)
+  return data
+}
+
+/**
+ * 带**多候选 base** 的重试：BASE 失败就换本机默认口 / 同源。
+ *
+ * # 为什么要这么写（真机踩过两轮）
+ *
+ * magpie 可能用 `file:` 加载面板（origin 为 `null`）、也可能用带前缀的代理路径。
+ * 单看一个来源不可靠，所以给一个**有限**的候选列表：去重后最多试 3 次，
+ * 全失败就把**最后一个**错误抛出去（不要无限循环）。
+ */
+async function api(path, body) {
+  const init = body === undefined
+    ? { cache: "no-store" }
+    : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }
+
+  const targets = [
+    BASE,
+    "http://127.0.0.1:4392",
+    location.origin && location.origin !== "null" ? location.origin : null,
+  ].filter(Boolean)
+
+  let lastErr = null
+  for (const base of [...new Set(targets)]) {
+    try {
+      return await apiOnce(base, path, init)
+    } catch (e) {
+      lastErr = e
+    }
+  }
+  throw lastErr ?? new Error("无法连接面板服务")
+}
+
+let toastTimer = 0
+function toast(msg, bad = false) {
+  const el = $("toast")
+  el.textContent = String(msg)
+  el.classList.toggle("bad", !!bad)
+  el.classList.add("show")
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => el.classList.remove("show"), 4000)
+}
+function setStatus(text, ok) {
+  const el = $("status")
+  el.textContent = text
+  el.classList.toggle("ok", ok === true)
+  el.classList.toggle("bad", ok === false)
+}
+function on(btn, fn) {
+  btn?.addEventListener("click", async () => {
+    if (btn.disabled) return
+    btn.disabled = true
+    try {
+      await fn()
+    } catch (e) {
+      toast(String(e?.message ?? e), true)
+    } finally {
+      btn.disabled = false
+    }
+  })
+}
+
+// ── tab ────────────────────────────────────────────────────────────────
+const TABS = ["account", "invite", "benefit", "settings"]
+function activateTab(name) {
+  for (const t of TABS) {
+    const tab = $(`tab-${t}`)
+    const pane = $(`pane-${t}`)
+    const isOn = t === name
+    tab.classList.toggle("is-on", isOn)
+    tab.setAttribute("aria-selected", String(isOn))
+    tab.tabIndex = isOn ? 0 : -1
+    pane.classList.toggle("is-on", isOn)
+    if (isOn) pane.removeAttribute("hidden")
+    else pane.setAttribute("hidden", "")
+  }
+}
+for (const t of TABS) $(`tab-${t}`)?.addEventListener("click", () => activateTab(t))
+
+// ── ① 账号表 ───────────────────────────────────────────────────────────
+const state = {
+  accounts: [],
+  selected: new Set(),
+  sort: { key: "accountId", dir: 1 },
+  recordsPage: 1,
+  recordsSize: 10,
+}
+
+function statusOf(a) {
+  const left = daysLeft(a.expires)
+  if (left !== null && left < 0) return { text: "已过期", cls: "fail" }
+  if (!a.hasPlatformToken) return { text: "无平台 token", cls: "warn" }
+  // 平台要求先绑微信（签到 / 绑定邀请码都会回 wechat_bind_required）
+  if (a.wechatRequired === true) return { text: "需绑微信", cls: "warn" }
+  return { text: "正常", cls: "done" }
+}
+
+function sortedAccounts() {
+  const list = [...state.accounts]
+  const { key, dir } = state.sort
+  list.sort((a, b) => {
+    const va = key === "points" ? Number(a.points ?? -1) : key === "expires" ? Number(a.expires) || 0 : String(a[key] ?? "")
+    const vb = key === "points" ? Number(b.points ?? -1) : key === "expires" ? Number(b.expires) || 0 : String(b[key] ?? "")
+    if (va === vb) return 0
+    return va > vb ? dir : -dir
+  })
+  return list
+}
+
+function renderAccounts(data) {
+  const list = data?.accounts ?? []
+  state.accounts = list
+
+  const sum = list.reduce((acc, a) => acc + (Number(a.points) || 0), 0)
+  const anyPoints = list.some((a) => a.points != null)
+  $("stat-accounts").textContent = String(list.length)
+  $("stat-points").textContent = anyPoints ? fmtNum(sum) : "—"
+  const expiries = list.map((a) => Number(a.expires) || 0).filter((n) => n > 0)
+  $("stat-expire").textContent = expiries.length ? fmtTime(Math.min(...expiries)) : "—"
+  $("accounts-cache-note").textContent = data?.at ? `缓存：${fmtAgo(data.at)}` : "还没有缓存"
+  $("stat-points-at").textContent = data?.at ? `缓存于 ${fmtAgo(data.at)}` : "来自缓存，点「刷新」更新"
+
+  const body = $("accounts-body")
+  if (list.length === 0) {
+    body.innerHTML = '<tr><td colspan="7"><div class="empty">还没有 quwork 账号</div></td></tr>'
+    updateSelectionUi()
+    return
+  }
+
+  body.innerHTML = sortedAccounts()
+    .map((a) => {
+      const st = statusOf(a)
+      const left = daysLeft(a.expires)
+      const leftText = left === null ? "" : left < 0 ? `（已过期 ${-left} 天）` : `（剩 ${left} 天）`
+      const checked = state.selected.has(a.key) ? "checked" : ""
+      return `<tr data-key="${esc(a.key)}">
+        <td class="col-check"><input type="checkbox" class="row-check" data-key="${esc(a.key)}" ${checked} aria-label="选择 ${esc(a.accountId)}"></td>
+        <td>${esc(a.accountId || "—")}<small class="mono">${esc(a.key)}</small></td>
+        <td><span class="pill ${st.cls}">${esc(st.text)}</span></td>
+        <td>${a.points == null ? "—" : fmtNum(a.points)}</td>
+        <td>${esc(fmtTime(a.expires))}<small>${esc(leftText)}</small></td>
+        <td>${a.models == null ? "—" : fmtNum(a.models)}</td>
+        <td class="row-actions">
+          <button class="tiny" data-act="refresh" data-key="${esc(a.key)}">刷新</button>
+          <button class="tiny" data-act="copy" data-key="${esc(a.key)}">复制 token</button>
+          ${st.text === "需绑微信" ? `<button class="tiny primary" data-act="wechat" data-key="${esc(a.key)}">绑定微信</button>` : ""}
+          <button class="tiny danger" data-act="delete" data-key="${esc(a.key)}">删除</button>
+        </td>
+      </tr>`
+    })
+    .join("")
+
+  updateSelectionUi()
+}
+
+function updateSelectionUi() {
+  const n = state.selected.size
+  $("selected-count").textContent = `已选 ${n}`
+  const allChecked = state.accounts.length > 0 && n === state.accounts.length
+  $("check-all").checked = allChecked
+  $("delete-selected").disabled = n === 0
+  $("refresh-selected").disabled = n === 0
+}
+
+async function loadAccounts() {
+  const data = await api("/api/accounts")
+  renderAccounts(data)
+  return data
+}
+
+// 行内勾选
+$("accounts-body")?.addEventListener("change", (e) => {
+  const el = e.target
+  if (!(el instanceof HTMLInputElement) || !el.classList.contains("row-check")) return
+  const key = el.dataset.key
+  if (el.checked) state.selected.add(key)
+  else state.selected.delete(key)
+  updateSelectionUi()
+})
+
+// 行内操作
+$("accounts-body")?.addEventListener("click", async (e) => {
+  const el = e.target
+  if (!(el instanceof HTMLButtonElement)) return
+  const act = el.dataset.act
+  const key = el.dataset.key
+  if (!act || !key) return
+
+  if (act === "refresh") {
+    el.disabled = true
+    try {
+      const d = await api("/api/accounts/refresh", { keys: [key] })
+      await loadAccounts()
+      toast(`已刷新 ${d.okCount}/${d.total}`)
+    } finally {
+      el.disabled = false
+    }
+    return
+  }
+  if (act === "copy") {
+    const acc = state.accounts.find((a) => a.key === key)
+    const text = acc?.llmToken ?? ""
+    if (!text) return toast("这个账号没有模型 token", true)
+    try {
+      await navigator.clipboard.writeText(text)
+      toast("已复制（打码显示，复制的是完整值请以 magpie 配置为准）")
+    } catch {
+      toast("复制失败，请在 plugin-auth.json 里查看", true)
+    }
+    return
+  }
+  if (act === "wechat") {
+    return openWechatPanel(key)
+  }
+  if (act === "delete") {
+    const acc = state.accounts.find((a) => a.key === key)
+    if (!acc) return
+    if (!confirm(`确定删除账号 ${acc.accountId || key}？\n会先备份 plugin-auth.json。`)) return
+    const d = await api("/api/accounts/delete", { keys: [key] })
+    state.selected.delete(key)
+    await loadAccounts()
+    toast(`已删除 ${d.deleted?.length ?? 1} 个账号（备份：${String(d.backup).split(/[\\/]/).pop()}）`)
+  }
+})
+
+$("check-all")?.addEventListener("change", (e) => {
+  if (e.target.checked) for (const a of state.accounts) state.selected.add(a.key)
+  else state.selected.clear()
+  renderAccounts({ accounts: state.accounts, at: 0 })
+})
+
+// ── 微信绑定小面板 ─────────────────────────────────────────────────────
+//
+// 链路：① 打开授权页 → 用户扫码 → 落到 llm.rrzu.com/oauth/wechat?code=…&state=…
+//      ② 用户把地址栏整段粘回来 → 服务端换 wechat_token 并绑定。
+//
+// ⚠ redirect_uri 必须是已备案域名，不能指向 127.0.0.1，所以「粘贴回调」是必须的一步。
+
+const wechatState = { key: "" }
+
+function openWechatPanel(key) {
+  const acc = state.accounts.find((a) => a.key === key)
+  wechatState.key = key
+  $("wechat-panel").hidden = false
+  $("wechat-account").textContent = acc ? `${acc.accountId || key}（${key}）` : key
+  $("wechat-callback").value = ""
+  $("wechat-note").textContent = ""
+  $("wechat-state-note").textContent = ""
+  $("wechat-panel").scrollIntoView({ behavior: "smooth", block: "nearest" })
+}
+
+$("wechat-close")?.addEventListener("click", () => {
+  $("wechat-panel").hidden = true
+  wechatState.key = ""
+})
+
+on($("wechat-start"), async () => {
+  if (!wechatState.key) return toast("先选一个账号", true)
+  const d = await api("/api/wechat/start", { key: wechatState.key })
+  if (!d.ok) return toast(d.error || "生成授权页失败", true)
+
+  $("wechat-state-note").textContent = `已生成 state（10 分钟内有效）：${String(d.state).slice(0, 8)}…`
+  // 交给系统浏览器打开（面板本身不弹窗）
+  try {
+    window.open(d.url, "_blank", "noopener,noreferrer")
+  } catch {
+    /* 被拦截就让用户手动点链接 */
+  }
+  $("wechat-note").textContent = "已打开授权页，扫码后把回调地址粘到下面"
+  $("wechat-note").className = "status"
+  toast("已打开微信授权页")
+})
+
+on($("wechat-finish"), async () => {
+  const callbackUrl = $("wechat-callback").value.trim()
+  const note = $("wechat-note")
+  if (!callbackUrl) {
+    note.textContent = "请粘贴回调地址"
+    note.className = "status bad"
+    return
+  }
+  const d = await api("/api/wechat/finish", { key: wechatState.key, callbackUrl })
+  if (!d.ok) {
+    note.textContent = d.error || "绑定失败"
+    note.className = "status bad"
+    toast(note.textContent, true)
+    return
+  }
+  note.textContent = d.message || "绑定成功"
+  note.className = "status ok"
+  await loadAccounts()
+  toast("绑定成功")
+})
+
+for (const th of document.querySelectorAll("th.sortable")) {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort
+    state.sort = { key, dir: state.sort.key === key ? -state.sort.dir : 1 }
+    renderAccounts({ accounts: state.accounts, at: 0 })
+  })
+}
+
+on($("select-all"), () => {
+  for (const a of state.accounts) state.selected.add(a.key)
+  renderAccounts({ accounts: state.accounts, at: 0 })
+})
+on($("select-none"), () => {
+  state.selected.clear()
+  renderAccounts({ accounts: state.accounts, at: 0 })
+})
+on($("refresh-selected"), async () => {
+  const keys = [...state.selected]
+  if (keys.length === 0) return toast("先选中账号", true)
+  setStatus(`刷新 ${keys.length} 个账号…`)
+  const d = await api("/api/accounts/refresh", { keys })
+  await loadAccounts()
+  setStatus(`已刷新 ${d.okCount}/${d.total}`, true)
+  toast("选中账号已刷新")
+})
+on($("delete-selected"), async () => {
+  const keys = [...state.selected]
+  if (keys.length === 0) return toast("先选中账号", true)
+  if (!confirm(`确定删除 ${keys.length} 个账号？\n会先备份 plugin-auth.json。`)) return
+  const d = await api("/api/accounts/delete", { keys })
+  state.selected.clear()
+  await loadAccounts()
+  toast(`已删除 ${d.deleted?.length ?? keys.length} 个账号`)
+})
+
+
+// ── ② 邀请（多账号表格）───────────────────────────────────────────────
+//
+// 每行 = 一个账号。读接口只读缓存（零上游）；「读取 / 绑定 / 记录」都只对**选中**账号生效，
+// 每行单独用一个账号自己的 token（后端按 `key` 找 token）。
+
+const inviteState = { accounts: [], selected: new Set(), recordsKey: "", recordsPage: 1 }
+
+function inviteSelectedKeys() {
+  return [...inviteState.selected]
+}
+
+function updateInviteSelectionUi() {
+  const n = inviteState.selected.size
+  $("invite-selected-count").textContent = `已选 ${n}`
+  $("invite-check-all").checked = inviteState.accounts.length > 0 && n === inviteState.accounts.length
+  $("invite-refresh-selected").disabled = n === 0
+  $("activate-run").disabled = n === 0
+  $("records-run").disabled = n === 0 && !inviteState.recordsKey
+}
+
+function renderInvite(data) {
+  const list = data?.accounts ?? []
+  inviteState.accounts = list
+  $("invite-cache-note").textContent = data?.at ? `缓存：${fmtAgo(data.at)}` : "还没有缓存"
+
+  const body = $("invite-body")
+  if (list.length === 0) {
+    body.innerHTML = '<tr><td colspan="8"><div class="empty">还没有 quwork 账号</div></td></tr>'
+    updateInviteSelectionUi()
+    return
+  }
+
+  body.innerHTML = list
+    .map((a) => {
+      const checked = inviteState.selected.has(a.key) ? "checked" : ""
+      const code = a.inviteCode ? `<code class="invite-code-big">${esc(a.inviteCode)}</code>` : "—"
+      return `<tr data-key="${esc(a.key)}"${inviteState.recordsKey === a.key ? ' class="is-current"' : ""}>
+        <td class="col-check"><input type="checkbox" class="invite-check" data-key="${esc(a.key)}" ${checked} aria-label="选择 ${esc(a.accountId)}"></td>
+        <td>${esc(a.accountId || "—")}<small class="mono">${esc(a.key)}</small></td>
+        <td>${code}</td>
+        <td>${a.invitedCount == null ? "—" : fmtNum(a.invitedCount)}</td>
+        <td>${a.points == null ? "—" : fmtNum(a.points)}</td>
+        <td>${a.quota == null ? "—" : fmtNum(a.quota)}</td>
+        <td>${a.at ? fmtAgo(a.at) : "无缓存"}</td>
+        <td class="row-actions">
+          <button class="tiny" data-iact="read" data-key="${esc(a.key)}">读取</button>
+          <button class="tiny" data-iact="copy" data-key="${esc(a.key)}">复制</button>
+        </td>
+      </tr>`
+    })
+    .join("")
+
+  updateInviteSelectionUi()
+}
+
+async function loadInvite() {
+  const data = await api("/api/invite/summary")
+  renderInvite(data)
+  return data
+}
+
+$("invite-body")?.addEventListener("change", (e) => {
+  const el = e.target
+  if (!(el instanceof HTMLInputElement) || !el.classList.contains("invite-check")) return
+  if (el.checked) inviteState.selected.add(el.dataset.key)
+  else inviteState.selected.delete(el.dataset.key)
+  updateInviteSelectionUi()
+})
+
+$("invite-body")?.addEventListener("click", async (e) => {
+  const el = e.target
+  if (!(el instanceof HTMLButtonElement)) return
+  const key = el.dataset.key
+  const act = el.dataset.iact
+
+  if (act === "copy") {
+    const acc = inviteState.accounts.find((a) => a.key === key)
+    if (!acc?.inviteCode) return toast("这个账号还没有邀请码，先点「读取」", true)
+    try {
+      await navigator.clipboard.writeText(String(acc.inviteCode))
+      toast(`已复制 ${acc.inviteCode}`)
+    } catch {
+      toast(`复制失败，请手动选中：${acc.inviteCode}`, true)
+    }
+    return
+  }
+  if (act === "read") {
+    el.disabled = true
+    try {
+      const d = await api("/api/invite/refresh", { keys: [key] })
+      await loadInvite()
+      toast(`已读取 ${d.okCount ?? 0}/${d.total ?? 1}`)
+    } finally {
+      el.disabled = false
+    }
+  }
+})
+
+$("invite-check-all")?.addEventListener("change", (e) => {
+  if (e.target.checked) for (const a of inviteState.accounts) inviteState.selected.add(a.key)
+  else inviteState.selected.clear()
+  renderInvite({ accounts: inviteState.accounts, at: 0 })
+})
+
+on($("invite-select-all"), () => {
+  for (const a of inviteState.accounts) inviteState.selected.add(a.key)
+  renderInvite({ accounts: inviteState.accounts, at: 0 })
+})
+on($("invite-select-none"), () => {
+  inviteState.selected.clear()
+  renderInvite({ accounts: inviteState.accounts, at: 0 })
+})
+
+on($("invite-refresh-selected"), async () => {
+  const keys = inviteSelectedKeys()
+  if (keys.length === 0) return toast("先选中账号", true)
+
+  const bar = $("invite-progress")
+  bar.hidden = false
+  bar.querySelector("i").style.width = "0%"
+
+  setStatus(`读取 ${keys.length} 个账号的邀请码…`)
+  const d = await api("/api/invite/refresh", { keys })
+  await loadInvite()
+
+  bar.querySelector("i").style.width = "100%"
+  setTimeout(() => {
+    bar.hidden = true
+  }, 600)
+
+  setStatus(`邀请码已更新 ${d.okCount ?? 0}/${d.total ?? keys.length}`, true)
+  toast("邀请码已更新")
+})
+
+on($("activate-run"), async () => {
+  const keys = inviteSelectedKeys()
+  const note = $("activate-note")
+  const inviteCode = $("activate-code").value.trim()
+
+  if (keys.length === 0) {
+    note.textContent = "先选中要绑定的账号"
+    note.className = "status bad"
+    return
+  }
+  if (!inviteCode) {
+    note.textContent = "请输入邀请码"
+    note.className = "status bad"
+    return
+  }
+
+  // 一次只绑一个账号（平台语义就是「这个号绑那个码」），多选时逐个来并汇总
+  const results = []
+  for (const key of keys) {
+    const d = await api("/api/invite/activate", { key, inviteCode })
+    const who = inviteState.accounts.find((a) => a.key === key)?.accountId ?? key
+    results.push(`${who}: ${d.message || (d.ok ? "绑定成功" : "绑定失败")}`)
+  }
+  note.textContent = results.join(" · ")
+  note.className = `status ${results.every((r) => r.includes("成功")) ? "ok" : "bad"}`
+  toast(results.join(" · "), !results.every((r) => r.includes("成功")))
+})
+
+// ── 邀请记录（选中账号后显示）──────────────────────────────────────────
+
+function currentRecordsKey() {
+  return inviteState.recordsKey || inviteSelectedKeys()[0] || ""
+}
+
+function renderRecords(list, { total = 0, page = 1, size = 10 } = {}) {
+  const body = $("records-body")
+  if (!Array.isArray(list) || list.length === 0) {
+    body.innerHTML = '<tr><td colspan="4"><div class="empty">没有邀请记录</div></td></tr>'
+  } else {
+    body.innerHTML = list
+      .map(
+        (r) => `<tr>
+          <td>${esc(fmtTime(r?.created_at ?? r?.createdAt))}</td>
+          <td>${esc(r?.phone ?? r?.invitee_phone ?? "—")}</td>
+          <td>${esc(r?.status ?? (r?.activated === true ? "已激活" : "—"))}</td>
+          <td>${fmtNum(r?.points ?? r?.reward_points)}</td>
+        </tr>`,
+      )
+      .join("")
+  }
+  const pages = size > 0 ? Math.max(1, Math.ceil(Number(total) / size)) : 1
+  const who = inviteState.accounts.find((a) => a.key === inviteState.recordsKey)?.accountId
+  $("records-title").textContent = who ? `邀请记录 · ${who}` : "邀请记录"
+  $("records-note").textContent = `第 ${page}/${pages} 页 · 共 ${total} 条`
+  inviteState.recordsPage = page
+}
+
+async function loadRecordsPage(page = 1) {
+  const key = currentRecordsKey()
+  if (!key) throw new Error("先在表格里选一个账号")
+  inviteState.recordsKey = key
+  const size = Number($("records-size").value) || 10
+  renderInvite({ accounts: inviteState.accounts, at: 0 })
+
+  const d = await api(`/api/invite/records?key=${encodeURIComponent(key)}&page=${page}&size=${size}`)
+  if (!d.ok) throw new Error(d.error || "读取失败")
+  renderRecords(d.list, { total: d.total, page: d.page, size: d.size })
+}
+
+on($("records-run"), async () => {
+  await loadRecordsPage(1)
+  toast("邀请记录已更新")
+})
+on($("records-page-prev"), () => loadRecordsPage(Math.max(1, inviteState.recordsPage - 1)))
+on($("records-page-next"), () => loadRecordsPage(inviteState.recordsPage + 1))
+
+// ── ③ 权益（多账号表格）───────────────────────────────────────────────
+
+const rewardState = { accounts: [], selected: new Set() }
+
+function rewardSelectedKeys() {
+  return [...rewardState.selected]
+}
+
+function updateRewardSelectionUi() {
+  const n = rewardState.selected.size
+  $("reward-selected-count").textContent = `已选 ${n}`
+  $("reward-check-all").checked = rewardState.accounts.length > 0 && n === rewardState.accounts.length
+  $("reward-status-refresh").disabled = n === 0
+  $("reward-claim-selected").disabled = n === 0
+}
+
+function renderRewardStatus(data) {
+  const list = data?.accounts ?? []
+  rewardState.accounts = list
+  updateKeyOptions(list, rewardState.selected)
+
+  const body = $("reward-body")
+  if (list.length === 0) {
+    body.innerHTML = '<tr><td colspan="8"><div class="empty">还没有 quwork 账号</div></td></tr>'
+    updateRewardSelectionUi()
+    return
+  }
+
+  body.innerHTML = list
+    .map((a) => {
+      const checked = rewardState.selected.has(a.key) ? "checked" : ""
+      const st = a.claimed === true ? { t: "已签到", c: "done" } : a.canClaim === true ? { t: "可签到", c: "warn" } : a.canClaim === false ? { t: "不可签到", c: "" } : { t: "未知", c: "" }
+      const wx = a.wechatRequired === true ? '<span class="pill warn">是</span>' : a.wechatRequired === false ? '<span class="pill done">否</span>' : "—"
+      return `<tr data-key="${esc(a.key)}">
+        <td class="col-check"><input type="checkbox" class="reward-check" data-key="${esc(a.key)}" ${checked} aria-label="选择 ${esc(a.accountId)}"></td>
+        <td>${esc(a.accountId || "—")}<small class="mono">${esc(a.key)}</small></td>
+        <td><span class="pill ${st.c}">${esc(st.t)}</span>${a.consecutiveDays != null ? `<small>连续 ${a.consecutiveDays} 天</small>` : ""}</td>
+        <td>${a.points == null ? "—" : fmtNum(a.points)}</td>
+        <td>${a.nextRefreshAt ? fmtTime(a.nextRefreshAt) : "—"}</td>
+        <td>${wx}</td>
+        <td>${a.at ? fmtAgo(a.at) : "无缓存"}</td>
+        <td class="row-actions">
+          <button class="tiny" data-ract="query" data-key="${esc(a.key)}">查询</button>
+          <button class="tiny" data-ract="claim" data-key="${esc(a.key)}">签到</button>
+        </td>
+      </tr>`
+    })
+    .join("")
+
+  updateRewardSelectionUi()
+}
+
+/** 兑换下拉：跟着账号列表刷新。 */
+function updateKeyOptions(list, selected) {
+  const sel = $("redeem-key")
+  if (!sel) return
+  const current = sel.value
+  sel.innerHTML = list.map((a) => `<option value="${esc(a.key)}">${esc(a.accountId || a.key)}</option>`).join("")
+  const wanted = current || [...selected][0]
+  if (wanted && list.some((a) => a.key === wanted)) sel.value = wanted
+}
+
+async function loadRewardStatus() {
+  const data = await api("/api/reward/status")
+  renderRewardStatus(data)
+  return data
+}
+
+$("reward-body")?.addEventListener("change", (e) => {
+  const el = e.target
+  if (!(el instanceof HTMLInputElement) || !el.classList.contains("reward-check")) return
+  if (el.checked) rewardState.selected.add(el.dataset.key)
+  else rewardState.selected.delete(el.dataset.key)
+  updateRewardSelectionUi()
+})
+
+$("reward-body")?.addEventListener("click", async (e) => {
+  const el = e.target
+  if (!(el instanceof HTMLButtonElement)) return
+  const key = el.dataset.key
+  const act = el.dataset.ract
+  const note = $("reward-note")
+
+  if (act === "query") {
+    el.disabled = true
+    try {
+      const d = await api("/api/reward/status/refresh", { keys: [key] })
+      await loadRewardStatus()
+      note.textContent = d.ok ? "已查询" : d.error || "查询失败"
+      note.className = `status ${d.ok ? "" : "bad"}`
+    } finally {
+      el.disabled = false
+    }
+    return
+  }
+  if (act === "claim") {
+    el.disabled = true
+    try {
+      const d = await api("/api/reward/claim", { key })
+      await loadRewardStatus()
+      note.textContent = d.ok ? `签到成功：+${d.granted ?? 0}` : d.message || d.error || "签到失败"
+      note.className = `status ${d.ok ? "ok" : "bad"}`
+    } finally {
+      el.disabled = false
+    }
+  }
+})
+
+$("reward-check-all")?.addEventListener("change", (e) => {
+  if (e.target.checked) for (const a of rewardState.accounts) rewardState.selected.add(a.key)
+  else rewardState.selected.clear()
+  renderRewardStatus({ accounts: rewardState.accounts, at: 0 })
+})
+
+on($("reward-select-all"), () => {
+  for (const a of rewardState.accounts) rewardState.selected.add(a.key)
+  renderRewardStatus({ accounts: rewardState.accounts, at: 0 })
+})
+on($("reward-select-none"), () => {
+  rewardState.selected.clear()
+  renderRewardStatus({ accounts: rewardState.accounts, at: 0 })
+})
+
+on($("reward-status-refresh"), async () => {
+  const keys = rewardSelectedKeys()
+  if (keys.length === 0) return toast("先选中账号", true)
+  setStatus(`查询 ${keys.length} 个账号的签到状态…`)
+  const d = await api("/api/reward/status/refresh", { keys })
+  await loadRewardStatus()
+  $("reward-note").textContent = `已查询 ${d.okCount ?? 0}/${d.total ?? keys.length}`
+  $("reward-note").className = "status"
+  setStatus("签到状态已更新", true)
+})
+
+on($("reward-claim-selected"), async () => {
+  const keys = rewardSelectedKeys()
+  if (keys.length === 0) return toast("先选中账号", true)
+
+  const lines = []
+  for (const key of keys) {
+    const d = await api("/api/reward/claim", { key })
+    const who = rewardState.accounts.find((a) => a.key === key)?.accountId ?? key
+    lines.push(`${who}: ${d.ok ? `+${d.granted ?? 0}` : d.message || d.error || "失败"}`)
+  }
+  await loadRewardStatus()
+  $("reward-note").textContent = lines.join(" · ")
+  $("reward-note").className = "status"
+  toast("签到已执行")
+})
+
+on($("gifts-load"), async () => {
+  const key = $("redeem-key")?.value || rewardSelectedKeys()[0]
+  const body = $("gifts-body")
+  if (!key) {
+    body.innerHTML = '<tr><td colspan="4"><div class="empty">先选择一个账号</div></td></tr>'
+    return
+  }
+  const d = await api(`/api/reward/gifts?key=${encodeURIComponent(key)}`)
+  const list = d.ok ? (d.list ?? []) : []
+  const who = rewardState.accounts.find((a) => a.key === key)?.accountId ?? key
+  $("gifts-note").textContent = d.ok ? `${list.length} 项` : d.message || d.error || "读取失败"
+  if (list.length === 0) {
+    body.innerHTML = '<tr><td colspan="4"><div class="empty">暂无月月送活动</div></td></tr>'
+    return
+  }
+  body.innerHTML = list
+    .map(
+      (g) => `<tr>
+        <td>${esc(who)}</td>
+        <td>${esc(g?.name ?? g?.title ?? "—")}</td>
+        <td class="mono">${esc(g?.description ?? JSON.stringify(g))}</td>
+        <td>${esc(g?.expire_at ? fmtTime(g.expire_at) : "—")}</td>
+      </tr>`,
+    )
+    .join("")
+})
+
+on($("redeem-run"), async () => {
+  const note = $("redeem-note")
+  const key = $("redeem-key")?.value || ""
+  const orderId = $("redeem-order").value.trim()
+  if (!key) {
+    note.textContent = "先选择账号"
+    note.className = "status bad"
+    return
+  }
+  const d = await api("/api/benefit/redeem", { key, orderId })
+  note.textContent = d.message || (d.ok ? "兑换成功" : "兑换失败")
+  note.className = `status ${d.ok ? "ok" : "bad"}`
+})
+
+// ── ④ 设置 ─────────────────────────────────────────────────────────────
+function renderSettings(data) {
+  const s = data?.settings ?? {}
+  $("setting-port").value = s.port ?? ""
+  $("setting-auto").checked = s.autoRefresh === true
+  $("setting-acc-conc").value = s.accountsConcurrency ?? 1
+  $("setting-pages").value = s.recordsPages ?? 3
+  $("settings-path").textContent = data?.path ?? "—"
+}
+async function loadSettings() {
+  const data = await api("/api/settings")
+  renderSettings(data)
+  return data
+}
+async function saveSettings() {
+  const payload = {
+    port: Number($("setting-port").value) || undefined,
+    autoRefresh: $("setting-auto").checked,
+    accountsConcurrency: Number($("setting-acc-conc").value) || 1,
+    recordsPages: Number($("setting-pages").value) || 3,
+  }
+  const data = await api("/api/settings", payload)
+  renderSettings(data)
+  $("settings-note").textContent = "已保存"
+  setTimeout(() => {
+    $("settings-note").textContent = ""
+  }, 2500)
+}
+for (const id of ["setting-port", "setting-auto", "setting-acc-conc", "setting-pages"]) {
+  $(id)?.addEventListener("change", () => saveSettings().catch((e) => toast(String(e?.message ?? e), true)))
+}
+
+// ── 顶栏 ───────────────────────────────────────────────────────────────
+on($("refresh-all"), async () => {
+  setStatus("刷新中…")
+  await api("/api/accounts/refresh", {})
+  await loadAccounts()
+  await api("/api/invite/refresh", {}).then((d) => renderInvite({ ...d, at: d.updatedAt })).catch(() => {})
+  setStatus("已刷新", true)
+  toast("全部已刷新")
+})
+
+// ── 启动：只读缓存（零上游）────────────────────────────────────────────
+;(async () => {
+  try {
+    $("upstream-model").textContent = "https://llm.quwork.cn/v1"
+    $("upstream-platform").textContent = "https://llm.rrzu.com"
+
+    const [accounts, invite, reward, settings] = await Promise.all([
+      loadAccounts(),
+      api("/api/invite/summary"),
+      api("/api/reward/status"),
+      loadSettings(),
+    ])
+    renderInvite(invite)
+    renderRewardStatus(reward)
+    setStatus(`缓存已载入（${accounts.accounts?.length ?? 0} 个账号）`, true)
+
+    if (settings?.settings?.autoRefresh === true) {
+      await api("/api/accounts/refresh", {}).then(loadAccounts).catch(() => {})
+    }
+  } catch (e) {
+    // ⚠ 失败必须**看得见**：否则表格永远停在「加载中…」（真机踩过）
+    const msg = String(e?.message ?? e)
+    setStatus(msg, false)
+    $("accounts-body").innerHTML = `<tr><td colspan="7"><div class="empty bad">无法连接面板服务：${esc(msg)}</div></td></tr>`
+    $("accounts-cache-note").textContent = "连接失败"
+    for (const [id, cols] of [["invite-body", 8], ["records-body", 4], ["reward-body", 8], ["gifts-body", 4]]) {
+      const el = $(id)
+      if (el) el.innerHTML = `<tr><td colspan="${cols}"><div class="empty bad">无法连接面板服务：${esc(msg)}</div></td></tr>`
+    }
+    toast(msg, true)
+  }
+})()
+
