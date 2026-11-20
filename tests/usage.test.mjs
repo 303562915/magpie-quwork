@@ -3,7 +3,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 
-import { makeUsageHook, pointsOf } from "../src/hooks/usage.mjs"
+import { makeUsageHook, pointsOf, QUOTA_PREFIX, STOP_PREFIX, NOTE_PREFIX } from "../src/hooks/usage.mjs"
 import { PLATFORM_BASE_URL } from "../src/constants.mjs"
 
 const LLM = "llm-token-abc123"
@@ -26,7 +26,7 @@ test("有平台 token → 打 PLATFORM_BASE_URL 的 /api/user/self，余额渲�
   assert.equal(urls[0], `${PLATFORM_BASE_URL}/api/user/self`)
   assert.equal(u.error, undefined, "成功时绝不能带 error（它会替代整个窗口显示）")
   assert.equal(u.windows.length, 1)
-  assert.equal(u.windows[0].name, "平台积分")
+  assert.equal(u.windows[0].name, "额度 · 平台积分")
   assert.equal(u.windows[0].balance, 26434, "余额语义：balance 就是还剩多少")
   assert.equal(u.windows[0].used, undefined, "不许发 used（会被算成已用 100%）")
   assert.equal(u.windows[0].limit, undefined)
@@ -80,7 +80,7 @@ test("pointsOf 认得多种字段名（points / quota / balance，含 data 包�
   assert.equal(pointsOf(null), null)
 })
 
-test("没有 llmToken → 提示未配置（不装作正常）", async () => {
+test("没有 llmToken → 提示「额度不可读（缺少 llmToken）」（不装作正常）", async () => {
   const u = await usageWith(async () => {
     throw new Error("不该发请求")
   })(async () => ({}))
@@ -108,10 +108,10 @@ const REAL_SELF = {
   },
 }
 
-test("15) 真实响应 → 「平台积分」窗 1099.60，balance===1099.6（无 used/limit）", async () => {
+test("15) 真实响应 → 「额度 · 平台积分」窗 1099.60，balance===1099.6（无 used/limit）", async () => {
   const u = await usageWith(async () => Response.json(REAL_SELF))(async () => ({ llmToken: LLM, token: TOKEN }))
 
-  const main = u.windows.find((w) => String(w.name) === "平台积分")
+  const main = u.windows.find((w) => String(w.name) === "额度 · 平台积分")
   assert.ok(main, `缺「平台积分」窗: ${JSON.stringify(u.windows)}`)
   assert.equal(main.display, "1099.60 积分")
   assert.equal(main.balance, 1099.6)
@@ -121,11 +121,11 @@ test("15) 真实响应 → 「平台积分」窗 1099.60，balance===1099.6（�
   assert.equal(u.error, undefined)
 })
 
-test("16) 同时给出「永久积分」「受限积分」两条 aside 说明窗", async () => {
+test("16) 同时给出「额度 · 永久积分」「额度 · 受限积分」两条 aside 窗", async () => {
   const u = await usageWith(async () => Response.json(REAL_SELF))(async () => ({ llmToken: LLM, token: TOKEN }))
 
-  const perm = u.windows.find((w) => String(w.name) === "永久积分")
-  const limited = u.windows.find((w) => String(w.name) === "受限积分")
+  const perm = u.windows.find((w) => String(w.name) === "额度 · 永久积分")
+  const limited = u.windows.find((w) => String(w.name) === "额度 · 受限积分")
   assert.ok(perm && limited, `缺说明窗: ${JSON.stringify(u.windows)}`)
   assert.equal(perm.aside, true)
   assert.equal(limited.aside, true)
@@ -137,7 +137,7 @@ test("17) total_points 是数字（非字符串）也认", async () => {
   const body = { data: { points_entitlement: { total_points: 88.5, permanent_points: 88.5, limited_points: 0 } } }
   const u = await usageWith(async () => Response.json(body))(async () => ({ llmToken: LLM, token: TOKEN }))
 
-  const main = u.windows.find((w) => String(w.name) === "平台积分")
+  const main = u.windows.find((w) => String(w.name) === "额度 · 平台积分")
   assert.equal(main.balance, 88.5)
   assert.equal(main.display, "88.50 积分")
 })
@@ -148,7 +148,7 @@ test("18) points_entitlement 缺失 → 回落 data.amount", async () => {
     token: TOKEN,
   }))
 
-  const main = u.windows.find((w) => String(w.name) === "平台积分")
+  const main = u.windows.find((w) => String(w.name) === "额度 · 平台积分")
   assert.ok(main, `回落失败: ${JSON.stringify(u.windows)}`)
   assert.equal(main.balance, 50)
   assert.equal(main.display, "50.00 积分")
@@ -169,13 +169,13 @@ test("19) 401 / success:false → 只有 aside 窗、**无** error 字段", asyn
   assert.equal(b.windows[0].aside, true)
 })
 
-test("20) 无平台 token → 仍是「额度未知」说明窗（回归）", async () => {
+test("20) 无平台 token → 「说明 · 额度不可读（没有平台 token）」说明窗（回归）", async () => {
   const u = await usageWith(async () => {
     throw new Error("不该发请求")
   })(async () => ({ llmToken: LLM, accountId: "13800000000" }))
 
   assert.equal(u.error, undefined)
-  assert.equal(u.windows[0].name, "额度未知")
+  assert.match(String(u.windows[0].name), /^说明 · 额度不可读（.+）$/, "T-31 命名：说明窗 + 原因")
   assert.equal(u.windows[0].aside, true)
   assert.match(String(u.windows[0].display), /13800000000/)
 })
@@ -192,7 +192,7 @@ test("21) windowsFromSelf：主窗只发 balance（数值），不发 used / lim
   const r = windowsFromSelf({
     data: { points_entitlement: { total_points: "872.04", permanent_points: "872.04", limited_points: "0.00" } },
   })
-  const main = r.windows.find((w) => w.name === "平台积分")
+  const main = r.windows.find((w) => w.name === "额度 · 平台积分")
 
   assert.equal(main.balance, 872.04)
   assert.equal(typeof main.balance, "number", "balance 必须是 number（路由按它排序）")
@@ -205,10 +205,121 @@ test("21) windowsFromSelf：主窗只发 balance（数值），不发 used / lim
 test("22) total=0（第三行那个号）→ balance===0，used/limit 仍为 undefined", async () => {
   const { windowsFromSelf } = await import("../src/hooks/usage.mjs")
   const r = windowsFromSelf({ data: { points_entitlement: { total_points: "0.00" } } })
-  const main = r.windows.find((w) => w.name === "平台积分")
+  const main = r.windows.find((w) => w.name === "额度 · 平台积分")
 
   assert.equal(main.balance, 0)
   assert.equal(main.used, undefined)
   assert.equal(main.limit, undefined)
   assert.equal(main.display, "0.00 积分")
+})
+
+// ── T-31：窗口命名一致性（跨插件统一）────────────────────────────────────
+//
+// 规范 `magpie-plugins/UNIFIED-PLAN.md` §1.1：**每一个**窗口名都必须以三个前缀之一开头。
+// 前缀与语义的对应：
+//
+//	额度 · …  参与路由（有 used，或 balance+unit）
+//	停用 · …  `used:100` ⇒ 路由跳过该号（quwork 没有任何依据这么做，所以一条都不该出现）
+//	说明 · …  `aside:true` ⇒ 只解释，不参与路由
+//
+// 一致性测试：把**每一条**返回路径都跑一遍（成功 / 只配模型 token / 什么都没配 /
+// HTTP 错 / 业务错 / 认不出字段 / 网络异常 / 带订阅），把产出窗口的名字全收起来逐条查。
+// 它不替代语义断言 —— 它只保证名字没有漂回旧写法。
+
+test("T-31：所有窗口名都必须以「额度 · / 停用 · / 说明 · 」之一开头（且前缀与字段语义一致）", async () => {
+  const PREFIXES = ["额度 · ", "停用 · ", "说明 · "]
+
+  const REAL_WITH_SUB = {
+    data: {
+      points_entitlement: {
+        total_points: "1099.60",
+        permanent_points: "1099.60",
+        limited_points: "0.00",
+        active_subscription: { name: "标准版" },
+      },
+    },
+  }
+
+  /** 每一条返回路径各造一个样例 */
+  const cases = [
+    {
+      label: "成功（带订阅）",
+      auth: { llmToken: LLM, token: TOKEN },
+      fetchImpl: async () => Response.json(REAL_WITH_SUB),
+    },
+    {
+      label: "成功（无订阅）",
+      auth: { llmToken: LLM, token: TOKEN },
+      fetchImpl: async () => Response.json(REAL_SELF),
+    },
+    {
+      label: "只有模型 token",
+      auth: { llmToken: LLM, accountId: "13800000000" },
+      fetchImpl: async () => {
+        throw new Error("不该发请求")
+      },
+    },
+    {
+      label: "什么都没配",
+      auth: {},
+      fetchImpl: async () => {
+        throw new Error("不该发请求")
+      },
+    },
+    { label: "HTTP 401", auth: { llmToken: LLM, token: TOKEN }, fetchImpl: async () => new Response("no", { status: 401 }) },
+    {
+      label: "业务失败",
+      auth: { llmToken: LLM, token: TOKEN },
+      fetchImpl: async () => Response.json({ success: false, message: "token invalid" }),
+    },
+    {
+      label: "认不出字段",
+      auth: { llmToken: LLM, token: TOKEN },
+      fetchImpl: async () => Response.json({ data: { somethingElse: true } }),
+    },
+    {
+      label: "网络异常",
+      auth: { llmToken: LLM, token: TOKEN },
+      fetchImpl: async () => {
+        throw new Error("ETIMEDOUT")
+      },
+    },
+  ]
+
+  /** @type {any[]} */
+  const seen = []
+  for (const c of cases) {
+    const u = await usageWith(c.fetchImpl)(async () => c.auth)
+    const windows = Array.isArray(u?.windows) ? u.windows : []
+    assert.ok(windows.length > 0, `[${c.label}] 没有窗口可查`)
+    seen.push(...windows.map((w) => ({ label: c.label, name: String(w?.name ?? ""), w })))
+  }
+
+  // ① 名字前缀
+  for (const { label, name } of seen) {
+    assert.ok(
+      PREFIXES.some((p) => name.startsWith(p)),
+      `[${label}] 窗口名「${name}」不符合 T-31 命名：必须以 ${PREFIXES.join(" / ")} 之一开头`,
+    )
+  }
+
+  // ② 前缀与字段语义必须一致（名字骗人比没名字更糟）
+  for (const { label, name, w } of seen) {
+    if (name.startsWith("停用 · ")) {
+      assert.equal(w.used, 100, `[${label}]「${name}」是停用窗 ⇒ used 必须是 100`)
+      assert.equal(w.aside, undefined, `[${label}]「${name}」是停用窗 ⇒ 不能带 aside`)
+    }
+    if (name.startsWith("说明 · ")) {
+      assert.equal(w.aside, true, `[${label}]「${name}」是说明窗 ⇒ 必须 aside:true`)
+      assert.equal(w.used, undefined, `[${label}]「${name}」是说明窗 ⇒ 不许带 used`)
+    }
+  }
+
+  // ③ quwork 一个「停用」窗都不该有：它没有判死一个号的依据（规范 §4.3 第 2 条）
+  assert.equal(seen.filter((s) => s.name.startsWith(STOP_PREFIX)).length, 0, "quwork 不许伪造 used:100")
+
+  // ④ 三个前缀里至少要出现两个（本文件真的覆盖到了说明窗与额度窗）
+  for (const p of [QUOTA_PREFIX, NOTE_PREFIX]) {
+    assert.ok(seen.some((s) => s.name.startsWith(p)), `本文件没有产出过「${p}…」窗口，一致性测试名存实亡`)
+  }
 })

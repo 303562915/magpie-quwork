@@ -16,8 +16,47 @@
 // # 刻意不实现
 //
 //	auth.refresh   续期由 loader 的旁路完成（`src/refresh.mjs`），没有独立 refresh token
-//	auth.checkin   签到强制绑微信（§7），做了也拿不到
-//	auth.import    批量导入是面板的能力；T-03 之后如有需要再加
+//
+// # auth.import（T-33）
+//
+// 「添加提供商」里的「从文件导入」是 magpie **自己的**钩子（OpenCode 忽略）。
+// 缺它时界面干脆不画这一行 —— 真机核对过 loomy / officeace / codearts 都有，
+// 只有 quwork 没有。形状见 `src/importer.mjs`（单对象 / 数组 / `version:1` 容器 /
+// NDJSON 都认，`llmToken` 必需）。
+//
+// # auth.checkin（T-32 修正）
+//
+// 早先的注释写「签到强制绑微信，做了也拿不到」——**只对了一部分**。真机实测
+// （`plugin-checkin.json` 的 quwork 条目）三个号里有一个能签，另两个回
+// `wechat_bind_required`。所以钩子**必须写**，且必须把三种结局分开报：
+//
+//	已签到   → `outcome:"done"`（**成功态**，绝不能报 failed，否则卡片显示失败）
+//	可签到   → 真打 `/api/user/daily-reward/claim` → `outcome:"claimed"` + `credit`
+//	需绑微信 → `outcome:"ineligible"` + 明确说「需先绑定微信」
+//
+// 形状真源：`host-acc034d984c6.js` 的 `checkinOf()`（约 3393-3411 行）——
+// `{outcome, credit?, streak?, message?, until?}`，`outcome` 必须是
+// `claimed|done|ineligible|inactive|captcha|failed` 之一，否则宿主自己拼
+// 「the plugin answered …」并判 failed。旧实现返回 `{ok, message}` 正是
+// 真机「quwork's plugin doesn't check in」的直接原因。
+//
+// # auth.options（T-32 新增）
+//
+// 形状真源：`host-acc034d984c6.js` 的 `optionsOf()`（约 2360-2382 行）。
+// **严格 schema**（多写字段会被静默丢弃，改少写字段会被读成默认）：
+//
+//	{ key, label, description?, default?, confirm?, labels?, descriptions?,
+//	  confirms?, filtersModels?, placement? }
+//
+//  ・`key`    必须 `^[a-z0-9_-]{1,40}$`，最多 16 个，重复/非法 key 直接跳过
+//  ・`label`  必填、≤60 字；没有 label 就**整项不出现**
+//  ・`default` 只认 `=== true`（即「布尔开关」；写 "yes"/1 一律当 false）
+//  ・`placement:"top"` = 画在账号区下方、Routing 上方；其余位置 = 画在模型下方
+//  ・插件里读当前值用 `input.magpie.option(provider, key)`（`host.js:2455`）
+//
+// ⚠ `package.json` 的 `magpie.options` 是另一回事（页面服务的**默认值表**，
+//   宿主侧 `declared()` 只从里面读 `maxConcurrency`/`maxAccounts`），
+//   它**不会**在界面上变成开关。界面开关只有 `auth.options` 这一条通道。
 //
 // # 为什么登录方式是「粘贴」
 //
@@ -37,6 +76,8 @@ import { defaultOpenExternal } from "./src/open-url.mjs"
 import { compact, accountIdOf } from "./src/identity.mjs"
 import { ICON } from "./src/icon.mjs"
 import { claimDailyReward, fetchDailyRewardStatus } from "./src/invite.mjs"
+import { collectResults, makeImportHook } from "./src/importer.mjs"
+import { makePasteImportMethod } from "./src/paste-import.mjs"
 
 /** `config` 钩子：只描述供应商本身，不发请求。 */
 function makeConfigHook(opts = {}) {
@@ -81,7 +122,8 @@ function makeConfigHook(opts = {}) {
  *	                 平台 `token` 放 `refresh`（magpie 的 keptAs 看到它就保留）
  *
  * @param {{platformBaseUrl?: string, configDir?: string, log?: any,
- *   fetchImpl?: typeof fetch, readLocal?: () => any}} [opts]
+ *   fetchImpl?: typeof fetch, readLocal?: () => any, client?: any}} [opts]
+ *   `client`：宿主的 `client.auth.set` 通道（批量导入时第 2..N 条靠它落盘）。
  * @returns {Array<object>}
  */
 function makeMethods(opts = {}) {
@@ -344,16 +386,191 @@ function makeMethods(opts = {}) {
     },
   ]
 
-  return [smsMethod, browserMethod, ...pasteMethods]
+  // ⑤ 从文件导入（粘贴 JSON / NDJSON）—— 导入入口放回**登录弹窗**里
+  // （供应商详情页把账号全列出来时，最底下的导入按钮翻不到）。
+  // 复用 `src/importer.mjs` 的解析/校验/去重，不写第二套解析器。
+  const importMethod = makePasteImportMethod({
+    configDir,
+    client: opts.client,
+    log,
+    collect: (texts) => collectResults(texts, { configDir, log }),
+  })
+
+  return [smsMethod, browserMethod, ...pasteMethods, importMethod]
+}
+
+/** `auth.checkin` 允许的 outcome 全集（真源：`host.js` 的 `checkinOutcomes`）。 */
+const CHECKIN_OUTCOMES = Object.freeze(["claimed", "done", "ineligible", "inactive", "captcha", "failed"])
+
+/**
+ * 上游"今天"什么时候翻页（epoch **毫秒**）。
+ *
+ * quwork 的 `next_refresh_at` 真机是**秒**（`1795190400` 换算出来正好是北京
+ * 次日 0 点），但契约允许 `until` 是 RFC3339 或毫秒。这里按量级归一：
+ * 小于 1e11 当秒 ×1000。认不出就不给 `until`（宿主的 `checkinOf` 对
+ * 不可读的时间点会返回空串，不会炸）。
+ *
+ * @param {number|string|undefined|null} v
+ * @returns {number|undefined}
+ */
+function expirationOf(v) {
+  const n = typeof v === "string" ? Number(v.trim()) : Number(v)
+  if (!Number.isFinite(n) || n <= 0) return undefined
+  return n < 1e11 ? Math.round(n * 1000) : Math.round(n)
 }
 
 /**
- * 供应商插件。
+ * 造 `auth.checkin` 钩子。
  *
- * @param {{client?: any, directory?: string}} [input] `directory` = magpie 配置目录
- * @param {object} [options] plugins.json 里这一项的 options（`baseUrl` / `platformBaseUrl`）
- * @returns {Promise<object>}
+ * 形状（照 `host.js:3393-3411` 的 `checkinOf` 抄，一个字段都不多给）：
+ *
+ *	{ outcome: "claimed"|"done"|"ineligible"|"inactive"|"captcha"|"failed",
+ *	  credit?, streak?, message?, until? }
+ *
+ * 三条硬约束：
+ *
+ *	① 已签到必须 `done`（**成功态**）。旧实现报 `{ok:false}` ⇒ 宿主判 failed。
+ *	② 需要绑微信不是"失败"，是"这个号没资格" ⇒ `ineligible`
+ *	   （`error_code: wechat_bind_required` 的语义，用户该去绑微信，不该重试）。
+ *	③ 任何异常都收成 `failed` + message，不往外抛 —— 宿主抛异常也判 failed，
+ *	   但那样就没有可读的原因了。
+ *
+ * @param {{platformBaseUrl?: string, fetchImpl?: typeof fetch, log?: any}} [opts]
+ * @returns {(getAuth: () => Promise<any>) => Promise<object>}
  */
+export function makeCheckinHook(opts = {}) {
+  const base = String(opts.platformBaseUrl ?? "").trim().replace(/\/+$/, "") || PLATFORM_BASE_URL
+  const fetchImpl = typeof opts.fetchImpl === "function" ? opts.fetchImpl : undefined
+  const log = opts.log ?? console
+
+  return async function checkin(getAuth) {
+    /** @type {any} */
+    let auth = {}
+    try {
+      auth = (await getAuth()) ?? {}
+    } catch {
+      auth = {}
+    }
+    // 平台 token：`token`（落盘）或 `refresh`（magpie 存的那个）都认 —— 与 usage 钩子同口径
+    const token = String(auth?.token ?? auth?.refresh ?? "").trim()
+    if (!token) {
+      return {
+        outcome: "ineligible",
+        message: "只配置了模型 token，读不到平台签到状态（补一个平台 token 即可）",
+      }
+    }
+
+    try {
+      const status = await fetchDailyRewardStatus({ platformBaseUrl: base, token, fetchImpl })
+
+      if (status.ok) {
+        const streak = Number(status.consecutiveDays) || 0
+        const until = expirationOf(status.nextRefreshAt)
+
+        // ① 今天已经签过：**成功态**，不是失败
+        if (status.claimed) {
+          return {
+            outcome: "done",
+            ...(streak > 0 ? { streak } : {}),
+            message: `今天已经签过了${streak > 0 ? `（连续 ${streak} 天）` : ""}`,
+            ...(until ? { until } : {}),
+          }
+        }
+
+        // ② 需要绑微信：不是"失败"，是这个号没资格
+        if (status.wechatRequired) {
+          return {
+            outcome: "ineligible",
+            message: "该账号签到需要先绑定微信（上游回 wechat_bind_required），去 QuWork 客户端绑完再签",
+            ...(until ? { until } : {}),
+          }
+        }
+      }
+
+      const r = await claimDailyReward({ platformBaseUrl: base, token, fetchImpl })
+      if (!r.ok) {
+        // 上游把"今天已签"当业务错误返回（success:false）时的兜底：
+        // 报 failed 会让卡片显示红，而事实是这个号今天好好的。
+        const said = String(r.message ?? "")
+        if (/已(经)?(签|领取)|今日已|already|claimed|repeated|重复/i.test(said)) {
+          return { outcome: "done", message: `今天已经签过了：${said}` }
+        }
+        // 夹带 wechat_bind_required 的失败也要报成 ineligible（语义优先于措辞）
+        if (/wechat|微信|bind_required/i.test(said)) {
+          return { outcome: "ineligible", message: `该账号签到需要先绑定微信：${said}` }
+        }
+        return { outcome: "failed", message: said || "签到被上游拒绝（没说原因）" }
+      }
+
+      // ③ 真签上了
+      const granted = Number(r.granted) || 0
+      const streak = Number(r.consecutiveDays) || 0
+      const points = Number(r.points) || 0
+      return {
+        outcome: "claimed",
+        ...(granted > 0 ? { credit: granted } : {}),
+        ...(streak > 0 ? { streak } : {}),
+        message: `签到成功 +${granted} 积分${streak > 0 ? `（连续 ${streak} 天）` : ""}${
+          points > 0 ? `，当前共 ${points} 积分` : ""
+        }`,
+      }
+    } catch (e) {
+      const message = String(e?.message ?? e).slice(0, 300)
+      try {
+        log?.warn?.(`quwork: 签到异常: ${message.slice(0, 160)}`)
+      } catch {
+        /* 日志失败不是业务失败 */
+      }
+      return { outcome: "failed", message }
+    }
+  }
+}
+
+/**
+ * `auth.options`：面板侧的两个开关（T-32）。
+ *
+ * ⚠ 只有**布尔**能被画成开关（`optionsOf` 把 `default` 归成 `o.default === true`）。
+ *   所以「登录轮询间隔（秒）」只能是 number 这个事实要写进 `description`，
+ *   不能指望界面上填数字 —— 那会抄错 schema（见文件头「# auth.options」）。
+ *
+ * ⚠ **key 必须全是小写**（`OPTION_KEY = /^[a-z0-9_-]{1,40}$/`）：
+ *   写成 `autoRefresh`(camelCase) 会被 `optionsOf()` **整项跳过**——
+ *   既不报错也不显示，是最难发现的那种失效。下面两个 key 都是小写。
+ *
+ * 两个键都真的被消费：
+ *
+ *	`autorefresh`  → `QuWorkPage` 的默认设置：面板打开后自动刷一次积分
+ *	                 （用户自己在面板「设置」里勾过就以面板为准）
+ *	`pollfaster`   → `methods()[② 浏览器登录]` 的轮询间隔（关=3 秒 / 开=1 秒）
+ *
+ * 读到它们靠 `input.magpie.option(provider, key)`（`host.js:2455`）。
+ * 这是 magpie 自有通道，OpenCode 里没有 ⇒ `input.magpie` 不存在时回落到 `default`。
+ */
+export const AUTH_OPTIONS = Object.freeze([
+  {
+    key: "autorefresh",
+    label: "打开面板自动刷新积分",
+    description: "面板打开后自动拉一次平台积分（不发任何请求给模型）。关掉则只在点「刷新」时读。",
+    labels: { zh: "打开面板自动刷新积分", en: "Auto refresh credits when the panel opens" },
+    descriptions: {
+      zh: "面板打开后自动拉一次平台积分。关掉则只在点「刷新」时读。",
+      en: "Read the platform credits once when the panel opens. Off: only when you press Refresh.",
+    },
+    default: false,
+  },
+  {
+    key: "pollfaster",
+    label: "登录轮询加快",
+    description:
+      "浏览器登录后读取本机登录态的间隔：关 = 默认 3 秒；开 = 1 秒（更快发现登录完成，也更耗电）。",
+    labels: { zh: "登录轮询加快", en: "Sign in: poll faster" },
+    descriptions: {
+      zh: "浏览器登录后读取本机登录态的间隔：关 = 3 秒；开 = 1 秒（更快，也更耗电）。",
+      en: "How often the browser sign-in reads the local credential: Off = 3s, On = 1s (faster, more CPU).",
+    },
+    default: false,
+  },
+])
 export const QuWorkAuthPlugin = async (input = {}, options = {}) => {
   const configDir = String(input?.directory ?? options?.configDir ?? "").trim()
   const modelBaseUrl = String(options?.baseUrl ?? "").trim() || MODEL_BASE_URL
@@ -364,6 +581,30 @@ export const QuWorkAuthPlugin = async (input = {}, options = {}) => {
   const log = input?.client?.app?.log
     ? { warn: (m) => input.client.app.log({ body: { service: PROVIDER, level: "warn", message: m } }) }
     : (options?.log ?? console)
+
+  // ── 界面开关（`auth.options`）的读法 ──
+  //
+  // `input.magpie.option(provider, key)` 是 magpie **独有**的通道（`host.js:2455`），
+  // 用户在供应商编辑页拨的开关就存在这里。OpenCode 里没有 `input.magpie`
+  // ⇒ 一律回落到本文件 `AUTH_OPTIONS` 里声明的 `default`。
+  //
+  // ⚠ 这里读出来就要**立刻**用于生产行为，否则就是个"拨了没反应"的假开关。
+  const option = (key, fallback) => {
+    try {
+      const v = input?.magpie?.option?.(PROVIDER, key)
+      return typeof v === "boolean" ? v : fallback
+    } catch {
+      return fallback
+    }
+  }
+  const autoRefreshOption = option("autorefresh", false)
+  // 「登录轮询加快」：开 = 1 秒，关 = 默认 3 秒。显式的 pollIntervalMs 优先（排障用）。
+  const pollIntervalMs =
+    Number.isFinite(options?.pollIntervalMs) && Number(options.pollIntervalMs) > 0
+      ? Number(options.pollIntervalMs)
+      : option("pollfaster", false)
+        ? 1000
+        : 3000
 
   // 续期器：loader 每条对话请求后 `void` 调一次（节流 60s，失败只 log）
   const refresh = makeRefresher({ configDir, log, platformBaseUrl })
@@ -380,6 +621,9 @@ export const QuWorkAuthPlugin = async (input = {}, options = {}) => {
         platformBaseUrl,
         configDir,
         log,
+        // `client` 只给「从文件导入（粘贴）」用：一次粘多条时，第 2..N 条要走
+        // `client.auth.set` 自己落盘（宿主一次登录只保存一个账号）。
+        client: input?.client,
         // 测试/排障注入点（生产不传 = 用全局 fetch 与本机读取）
         fetchImpl: typeof options?.fetchImpl === "function" ? options.fetchImpl : undefined,
         readLocal: typeof options?.readLocal === "function" ? options.readLocal : undefined,
@@ -387,35 +631,30 @@ export const QuWorkAuthPlugin = async (input = {}, options = {}) => {
         loginUrl: options?.loginUrl,
         openExternal: typeof options?.openExternal === "function" ? options.openExternal : undefined,
         pollMs: options?.pollMs,
-        pollIntervalMs: options?.pollIntervalMs,
+        // 开关「登录轮询加快」决定的值（开=1s / 关=3s），显式 pollIntervalMs 已在上面优先
+        pollIntervalMs,
         sleep: typeof options?.sleep === "function" ? options.sleep : undefined,
         now: typeof options?.now === "function" ? options.now : undefined,
       }),
       loader: makeLoaderHook({ modelBaseUrl, log, refresh, bodyMode }),
       usage: makeUsageHook({ platformBaseUrl, log }),
+      // 界面开关（真源见文件头「# auth.options」）。**必须**挂在 `auth` 上，
+      // 挂在返回对象顶层等于没写（`optionsOf(a.auth)`）。
+      options: AUTH_OPTIONS.map((o) => ({ ...o })),
       /**
        * `auth.checkin`：magpie 自己的签到钩子（OpenCode 忽略）。
        *
-       * 上游签到是 `/api/user/daily-reward/claim`（需要平台 token）。
-       * ⚠ 不写 `error`：拿不到/不能签就如实说，别让 magpie 把账号判失效。
+       * 形状与三种结局见 `makeCheckinHook` 的注释（T-32 修正）。
        */
-      checkin: async (getAuth) => {
-        const auth = await getAuth()
-        const token = String(auth?.token ?? auth?.refresh ?? "").trim()
-        if (!token) return { ok: false, message: "没有平台 token，无法签到" }
-
-        const status = await fetchDailyRewardStatus({ platformBaseUrl, token, fetchImpl: options?.fetchImpl })
-        if (status.ok && status.claimed) {
-          return { ok: false, message: `今天已经签过了（连续 ${status.consecutiveDays} 天）` }
-        }
-        if (status.ok && status.wechatRequired) {
-          return { ok: false, message: "该账号签到需要先绑定微信" }
-        }
-
-        const r = await claimDailyReward({ platformBaseUrl, token, fetchImpl: options?.fetchImpl })
-        if (!r.ok) return { ok: false, message: r.message }
-        return { ok: true, message: `签到成功：+${r.granted} 积分（连续 ${r.consecutiveDays} 天）`, points: r.points }
-      },
+      checkin: makeCheckinHook({ platformBaseUrl, fetchImpl: options?.fetchImpl, log }),
+      /**
+       * `auth.import`：magpie 自己的「从文件导入账号」钩子（OpenCode 忽略）。
+       *
+       * 缺这个键时「添加提供商」里**不出现**「从文件导入」这一行（真机核对过）。
+       * 形状与解析规则见 `src/importer.mjs`；`configDir` 用来读 `plugin-auth.json`
+       * 做去重，不传就不去重（不会因为读不到而报错）。
+       */
+      ...makeImportHook({ configDir, log }),
     },
     provider: {
       id: PROVIDER,
@@ -445,7 +684,16 @@ export const QuWorkAuthPlugin = async (input = {}, options = {}) => {
  */
 export const QuWorkPage = async (input = {}, options = {}) => {
   const { QuWorkPage: serve } = await import("./server.mjs")
-  return serve(input, options)
+  // 界面开关 `autorefresh` → 面板默认设置（用户自己在面板里勾过就以面板文件为准，
+  // 见 server.mjs 的 `effectiveSettings` 合并顺序）。
+  let autoRefresh
+  try {
+    const v = input?.magpie?.option?.(PROVIDER, "autorefresh")
+    if (typeof v === "boolean") autoRefresh = v
+  } catch {
+    autoRefresh = undefined
+  }
+  return serve(input, autoRefresh === undefined ? options : { ...options, autoRefresh, fromOption: true })
 }
 
 /**

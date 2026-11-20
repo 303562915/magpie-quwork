@@ -18,6 +18,21 @@
 
 import { PLATFORM_BASE_URL, SELF_PATH, PLATFORM_TIMEOUT_MS } from "../constants.mjs"
 
+// ── 窗口命名的三个前缀（T-31：跨插件统一）────────────────────────────────
+//
+// 规范见 `magpie-plugins/UNIFIED-PLAN.md` §1.1，全部窗口名只能以这三者之一开头：
+//
+//	额度 · <名称>   正常参与路由的额度（有 `used`，或 `balance`+`unit`）
+//	停用 · <原因>   `used: 100` —— **让路由跳过该号**的唯一手段（规范 §4.4）
+//	说明 · <主题>   `aside: true` —— 只解释，不参与路由
+//
+// ⚠ quwork **没有任何 `停用 · ` 窗口**：积分是预付费钱包（只有 `balance`），
+//   本插件没有任何依据说「这个号不能用了」——伪造 `used:100` 会把健康的号判死（规范 §4.3 第 2 条）。
+// ⚠ 名字里**不写数值**（`剩 N` 之类），magpie 自己会按 amount/limit/balance 渲染。
+export const QUOTA_PREFIX = "额度 · "
+export const STOP_PREFIX = "停用 · "
+export const NOTE_PREFIX = "说明 · "
+
 /**
  * 把一个「可能是字符串的数字」转成 number；转不成就 `undefined`。
  *
@@ -121,10 +136,22 @@ export function windowsFromSelf(body) {
 
   /** @type {object[]} */
   const windows = [
-    { name: "平台积分", balance: Number(e.total), unit: "积分", display: `${fmtPoints(e.total)} 积分` },
+    {
+      name: `${QUOTA_PREFIX}平台积分`,
+      balance: Number(e.total),
+      unit: "积分",
+      display: `${fmtPoints(e.total)} 积分`,
+    },
   ]
-  if (e.permanent !== undefined) windows.push({ name: "永久积分", aside: true, display: fmtPoints(e.permanent) })
-  if (e.limited !== undefined) windows.push({ name: "受限积分", aside: true, display: fmtPoints(e.limited) })
+  // 「永久积分 / 受限积分」是**同一份额度的拆分**，各自没有总量 ⇒ aside（不参与路由）。
+  // ⚠ 字段一个不动（T-31 只改名字）：仍是 `aside:true` + `display`，不补 amount/limit ——
+  //   补了就等于替 magpie 编一个分母，那属于 P1「额度窗语义」的活，不混进纯改名。
+  if (e.permanent !== undefined) {
+    windows.push({ name: `${QUOTA_PREFIX}永久积分`, aside: true, display: fmtPoints(e.permanent) })
+  }
+  if (e.limited !== undefined) {
+    windows.push({ name: `${QUOTA_PREFIX}受限积分`, aside: true, display: fmtPoints(e.limited) })
+  }
 
   const sub = e.subscription
   if (sub) {
@@ -132,7 +159,7 @@ export function windowsFromSelf(body) {
       typeof sub === "string"
         ? sub
         : String(sub?.name ?? sub?.title ?? sub?.plan_name ?? sub?.display_name ?? "有")
-    windows.push({ name: "订阅", aside: true, display: label })
+    windows.push({ name: `${NOTE_PREFIX}订阅 ${label}`, aside: true, display: label })
   }
   return { windows }
 }
@@ -163,7 +190,7 @@ export function makeUsageHook(opts = {}) {
 
     // 连模型 token 都没有：这个账号根本没配好
     if (!llmToken) {
-      return { windows: [{ name: "未配置", aside: true, display: "缺少 llmToken，无法调用模型" }] }
+      return { windows: [{ name: `${NOTE_PREFIX}额度不可读（缺少 llmToken）`, aside: true, display: "缺少 llmToken，无法调用模型" }] }
     }
 
     // 只有 llmToken：能调模型，但读不到积分
@@ -171,7 +198,7 @@ export function makeUsageHook(opts = {}) {
       return {
         windows: [
           {
-            name: "额度未知",
+            name: `${NOTE_PREFIX}额度不可读（没有平台 token）`,
             aside: true,
             display: `${account}只配置了模型 token，读不到平台积分（补一个平台 token 即可显示）`,
           },
@@ -193,10 +220,12 @@ export function makeUsageHook(opts = {}) {
       if (!resp.ok) {
         log?.warn?.(`quwork: /api/user/self 返回 HTTP ${resp.status}`)
         // ⚠ **不写顶层 error**：那会让 magpie 把账号判失效。只给一条 aside 说明。
+        // ⚠ 三种「读不到」共用同一个窗名，**原因写进 name 的括号 + display**
+        //   （名字带原因＝卡片上看得见为什么；不建三条同义窗＝不刷屏）。
         return {
           windows: [
             {
-              name: "额度不可读",
+              name: `${NOTE_PREFIX}额度不可读（HTTP ${resp.status}）`,
               aside: true,
               display: "平台 token 可能已过期，请重新登录",
             },
@@ -209,18 +238,28 @@ export function makeUsageHook(opts = {}) {
       // 业务失败（HTTP 200 + success:false）同样只给说明窗
       if (body && typeof body === "object" && body.success === false) {
         log?.warn?.(`quwork: /api/user/self 业务失败: ${String(body.message ?? "").slice(0, 80)}`)
-        return { windows: [{ name: "额度不可读", aside: true, display: "平台 token 可能已过期，请重新登录" }] }
+        return {
+          windows: [
+            { name: `${NOTE_PREFIX}额度不可读（业务失败）`, aside: true, display: "平台 token 可能已过期，请重新登录" },
+          ],
+        }
       }
 
       const rendered = windowsFromSelf(body)
       if (!rendered) {
         log?.warn?.("quwork: /api/user/self 响应里没认出 points_entitlement / points / amount")
-        return { windows: [{ name: "额度不可读", aside: true, display: "平台响应里没有可识别的积分字段" }] }
+        return {
+          windows: [
+            { name: `${NOTE_PREFIX}额度不可读（响应里没有积分字段）`, aside: true, display: "平台响应里没有可识别的积分字段" },
+          ],
+        }
       }
       return rendered
     } catch (e) {
       log?.warn?.(`quwork: 读积分异常: ${String(e?.message ?? e).slice(0, 160)}`)
-      return { windows: [{ name: "额度不可读", aside: true, display: "读取平台积分失败（网络）" }] }
+      return {
+        windows: [{ name: `${NOTE_PREFIX}额度不可读（网络）`, aside: true, display: "读取平台积分失败（网络）" }],
+      }
     }
   }
 }

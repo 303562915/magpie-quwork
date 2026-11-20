@@ -18,8 +18,8 @@ const p = await QuWorkAuthPlugin({}, {})
 
 test("auth.methods 是**数组**（不是对象、不是函数）", () => {
   assert.ok(Array.isArray(p.auth.methods), `实际类型: ${typeof p.auth.methods}`)
-  // ① 手机号+短信 ② 浏览器登录 ③④ 两种粘贴
-  assert.equal(p.auth.methods.length, 4)
+  // ① 手机号+短信 ② 浏览器登录 ③④ 两种粘贴 ⑤ 从文件导入（粘贴）
+  assert.equal(p.auth.methods.length, 5)
 })
 
 test("每项都有 type / label；prompts（若有）结构合法", () => {
@@ -38,16 +38,17 @@ test("每项都有 type / label；prompts（若有）结构合法", () => {
   }
 })
 
-test("四项顺序：手机号 → 客户端登录 → 粘贴（兜底在最后）", () => {
+test("五项顺序：手机号 → 客户端登录 → 两种粘贴 → 从文件导入（兜底在最后）", () => {
   const labels = p.auth.methods.map((m) => String(m.label))
   assert.match(labels[0], /手机号/)
   assert.match(labels[1], /客户端|浏览器/)
   assert.match(labels[2], /粘贴/)
   assert.match(labels[3], /粘贴/)
+  assert.match(labels[4], /从文件导入/)
 })
 
 test("粘贴项问的 key：第一项只有 llmToken，第二项 llmToken+token", () => {
-  const paste = p.auth.methods.filter((m) => String(m.label).includes("粘贴"))
+  const paste = p.auth.methods.filter((m) => String(m.label).startsWith("粘贴"))
   assert.deepEqual(paste[0].prompts.map((x) => x.key), ["llmToken"])
   assert.deepEqual(paste[1].prompts.map((x) => x.key), ["llmToken", "token"])
   assert.equal(paste[0].prompts[0].type, "password", "token 类字段要遮起来")
@@ -55,7 +56,7 @@ test("粘贴项问的 key：第一项只有 llmToken，第二项 llmToken+token"
 
 test("magpie 会 map 出的三个字段都在（type / label / labels 可选）", () => {
   const projected = p.auth.methods.map((m) => ({ type: m.type, label: m.label, labels: m.labels }))
-  assert.equal(projected.length, 4)
+  assert.equal(projected.length, 5)
   assert.ok(projected.every((x) => x.type === "oauth" && typeof x.label === "string"))
 })
 

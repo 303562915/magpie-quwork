@@ -236,6 +236,45 @@ export const CORS = Object.freeze({
  * @param {{configDir?: string, platformBaseUrl?: string, log?: any, fetchImpl?: typeof fetch,
  *   credential?: any}} [opts]
  */
+/**
+ * 面板设置的**实际生效值**。
+ *
+ * 三层，后者覆盖前者：
+ *
+ *	① `DEFAULT_SETTINGS`        代码里的默认
+ *	② `options.autoRefresh`     magpie 界面开关 `auth.options.autoRefresh`
+ *	                            （`QuWorkPage` 从 `input.magpie.option()` 读出来传进
+ *	                            `options`；只有布尔才认，`undefined` = 不覆盖）
+ *	③ `quwork-panel-settings.json` 用户在面板「设置」里自己勾过的值（**最高**）
+ *
+ * 为什么要 ③ 最高：面板是完整的状态机，用户在那儿明确勾过一次就是最强的意图；
+ * 界面开关只是"没设置过时的默认"。`settingsSave` 走的是同一层逻辑。
+ *
+ * @param {string} configDir
+ * @param {{autoRefresh?: any, fromOption?: boolean}} [options]
+ *   `autoRefresh`：magpie 界面开关的值（布尔才认）；`fromOption`：
+ *   **这个值是不是用户刚在 magpie 里拨的** —— 是的话它要**覆盖**面板文件
+ *   （用户刚拨了一下，<= 立刻生效；只作为"默认"用会让用户觉得拨了没反应）。
+ *   没传 `fromOption` 时按"只是默认"处理（面板文件最高）。
+ * @returns {Record<string, any>}
+ */
+export function effectiveSettings(configDir, options = {}) {
+  const fromOption = typeof options?.autoRefresh === "boolean" ? { autoRefresh: options.autoRefresh } : {}
+  const prev = readJsonFile(join(String(configDir ?? "").trim(), "quwork-panel-settings.json")) ?? {}
+  return options?.fromOption === true
+    ? { ...DEFAULT_SETTINGS, ...prev, ...fromOption }
+    : { ...DEFAULT_SETTINGS, ...fromOption, ...prev }
+}
+
+/**
+ * 构建面板 API（纯装配，不 listen）。
+ *
+ * 提出来的理由（T-32）：`effectiveSettings` 要能在**不监听的进程**里被验证
+ * （原来的启动内联在里面，测试只能真起一个服务才能看设置）。
+ *
+ * @param {{configDir?: string, platformBaseUrl?: string, log?: any, fetchImpl?: typeof fetch,
+ *   credential?: any, now?: () => number, autoRefresh?: boolean}} [opts]
+ */
 export function createPageServer(opts = {}) {
   const configDir = String(opts.configDir ?? "").trim()
   const platformBaseUrl = String(opts.platformBaseUrl ?? "").trim() || PLATFORM_BASE_URL
@@ -512,16 +551,15 @@ export function createPageServer(opts = {}) {
       return { ok: true, cached: false, at: stamp, updatedAt: stamp, okCount, failed, total: keys.length, accounts }
     },
 
-    /** 设置：读。 */
+    /** 设置：读（含 magpie 界面开关提供的默认值，见 `effectiveSettings`）。 */
     async settings() {
-      return { ok: true, settings: { ...DEFAULT_SETTINGS, ...(readJsonFile(settingsFile()) ?? {}) }, path: settingsFile() }
+      return { ok: true, settings: effectiveSettings(configDir, opts), path: settingsFile() }
     },
 
     /** 设置：写（只接受白名单字段，别让页面把任意键塞进文件）。 */
     async settingsSave(input) {
-      const prev = readJsonFile(settingsFile()) ?? {}
       /** @type {Record<string, any>} */
-      const next = { ...DEFAULT_SETTINGS, ...prev }
+      const next = { ...effectiveSettings(configDir, opts) }
       for (const k of Object.keys(DEFAULT_SETTINGS)) {
         if (input && Object.prototype.hasOwnProperty.call(input, k)) next[k] = input[k]
       }
@@ -933,6 +971,9 @@ export const QuWorkPage = async (input = {}, options = {}) => {
   const server = createPageServer({
     configDir,
     platformBaseUrl: options?.platformBaseUrl,
+    // magpie 界面开关 `auth.options.autorefresh`（`QuWorkPage` 在 index.mjs 里读好传进来）
+    autoRefresh: typeof options?.autoRefresh === "boolean" ? options.autoRefresh : undefined,
+    fromOption: options?.fromOption === true,
     log: input?.client?.app?.log ? { warn: (m) => input.client.app.log({ body: { service: "quwork", level: "warn", message: m } }) } : console,
     fetchImpl: options?.fetchImpl,
     credential: options?.credential,

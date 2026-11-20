@@ -12,10 +12,11 @@
 |---|---|
 | `config` | 把 provider 的 `baseURL` 指向模型平面 `https://llm.quwork.cn/v1` |
 | `auth.loader` | 把任何 `/chat/completions` 请求改写到模型平面，鉴权换成 `Bearer <llmToken>`，按 `bodyMode` 补客户端形态（见 §2.5） |
-| `auth.usage` | 有平台 `token` → 读 `/api/user/self` 的 **`points_entitlement`** 显示积分；只有 `llmToken` → 给一条说明窗（不伪造额度） |
+| `auth.usage` | 有平台 `token` → 读 `/api/user/self` 的 **`points_entitlement`** 显示积分（`额度 · 平台积分`）；只有 `llmToken` → 给一条说明窗（`说明 · 额度未知`，不伪造额度） |
 | `auth.methods` | **数组**（magpie 直接 `map` 它），四项：① 手机号 + 短信验证码（**真登录**）② 打开浏览器登录（读浏览器存储）③ 粘贴 `llm_token` ④ 粘贴 `llm_token` + 平台 `token` |
 | `provider.models` | live `GET /v1/models` → 失败回落内置的 10 个权威模型 |
 | `auth.checkin` | 签到：`GET /api/user/daily-reward/status` + `POST /api/user/daily-reward/claim` |
+| `auth.import` | 「添加提供商」里的**从文件导入**（magpie 自有钩子，OpenCode 忽略）：单对象 / 数组 / `version:1` 容器 / NDJSON 都认，`llmToken` 必需；与 `plugin-auth.json` 里已有的 `quwork*` 去重，单次最多 100 条（超出会明确说还剩几条） |
 | `icon`（`auth.icon`） | 官方图标的内嵌 PNG data URI（约 14 KB，magpie 不拉外部 URL） |
 | `QuWorkPage`（**模块级具名导出**） | 本地面板服务：账号 / 邀请码 / 绑定 / 权益（见 §7.6） |
 
@@ -28,7 +29,8 @@
 > ⚠ **积分字段**：真实可用额度在 `points_entitlement.total_points`（字符串，如
 > `"1099.60"`）；`amount` / `quota` 在 qurvis 这套里**恒为 0**。早期读 `quota`
 > 导致卡片永远显示「0 积分」。主窗用 `used = limit = total`（余额语义 ⇒ 显示 0% 占用），
-> `permanent_points` / `limited_points` / `active_subscription` 各给一条 `aside` 说明窗。
+> `permanent_points` / `limited_points` / `active_subscription` 各给一条 `aside` 窗
+> （`额度 · 永久积分` / `额度 · 受限积分` / `说明 · 订阅 <套餐名>`）。
 
 ## 2. 两个 base（**别混用**）
 
@@ -95,6 +97,30 @@ Accept: application/json
 - 重复导入同一个 `llmToken`（或同 `uid`）**不会**产生重复条目
 - `access` 恒等于 `llmToken`；续期只覆盖 `token`/`expire`，**绝不动** `llmToken`
 
+### 3.1 从文件导入（`auth.import`）
+
+供应商编辑页的「**从文件导入账号…**」由 magpie 自己画 —— 插件提供 `auth.importFrom` +
+`auth.import`（缺这两个键，那一行**整行不出现**，且不报错）。
+
+认的输入形状（`llmToken` 优先级：`llmToken` → `llm_token` → `access`）：
+
+```jsonc
+// ① 客户端/面板导出的形态
+{ "llmToken": "sk-...", "token": "eyJ...", "phone": "150...", "uid": "6415", "expire": 1797702136 }
+// ② magpie 账号卡片的形态（access/refresh 是 magpie 的字段名）
+{ "access": "sk-...", "refresh": "eyJ...", "accountId": "150...", "expires": 1797702136000 }
+// ③ 带 platform 标记的行
+{ "platform": "quwork", "llmToken": "sk-..." }
+```
+
+外层可以是**单对象**、**数组**、`{provider, version: 1, accounts: [...]}` 容器，或
+**每行一个对象的 NDJSON**（空行、`#` / `//` 注释行跳过；中间坏一行只丢那一行）。
+
+- `expire` 是**秒**（自动 ×1000）；`expires` 按毫秒原样收
+- 单次最多 **100 条**，超出会**明确**回一条 failed 说明还剩几条（不会静默截断）
+- 已存在于 `plugin-auth.json` 的 `quwork*` / 本批次内重复的 `llmToken` → 该条 failed
+- 每条错误都带位置：`文件 N 第 M 条：<原因>`
+
 ## 4. 模型
 
 默认 10 个（客户端缓存的权威列表）：
@@ -146,7 +172,7 @@ Accept: application/json
 | 1 | `/v1/models` 是否真的存在 | ❓ 文档只列了 chat；拿不到就回内置表 |
 | 2 | `/api/user/self` 的响应字段名 | ❓ 无实测样本；按 `points/quota/balance/score` 宽容解析，认不出就说认不出 |
 | 3 | `refresh` 后旧 token 是否作废 | ❓ 未验证（§7 验证清单第 2 条） |
-| 4 | `llm_token` 能否打平台 API | ❓ 推测不能（用途分离）——所以只有 `llmToken` 时显示「额度未知」 |
+| 4 | `llm_token` 能否打平台 API | ❓ 推测不能（用途分离）——所以只有 `llmToken` 时显示「`说明 · 额度未知`」 |
 | 5 | 注册链路 | ⚠ 发码要过阿里云滑块（§1），本插件不自动化 |
 
 ## 7. 登录（四项，按现实可行性排序）
@@ -229,7 +255,7 @@ curl https://llm.quwork.cn/v1/chat/completions \
 
 - `accountId` 是**非空字符串**；
 - `metadata` 里**没有任何** `""` 值（全是空就整个删掉）；
-- 有平台 token 才写 `token`，否则卡片会一直显示「额度未知」。
+- 有平台 token 才写 `token`，否则卡片会一直显示「`说明 · 额度未知`」。
 
 ## 7.6 面板（账号 / 邀请 / 权益 / 设置）
 
@@ -314,7 +340,7 @@ curl -s http://127.0.0.1:4392/任意路径 | head -c 60   # SPA 兜底：回面�
 > `json: cannot unmarshal string ... of type int64`。所以界面把输入框标成「订单号（纯数字）」，
 > 并在本地先挡掉非整数（不发注定失败的请求）。
 >
-> ⚠ 积分窗用 magpie 的 **`balance`** 字段（「预付费钱包还剩多少」），**不发 `used`/`limit`**：
+> ⚠ 积分窗（`额度 · 平台积分`）用 magpie 的 **`balance`** 字段（「预付费钱包还剩多少」），**不发 `used`/`limit`**：
 > 之前 `used = limit = total` 会被算成「已用 100% / 剩余 0%」（真机截图：872.04 的号显示剩余 0%）。
 > `balance` 是 number，magpie 还会按它把余额多的号排前面。
 >
