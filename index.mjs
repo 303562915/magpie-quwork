@@ -79,18 +79,35 @@ import { claimDailyReward, fetchDailyRewardStatus } from "./src/invite.mjs"
 import { collectResults, makeImportHook } from "./src/importer.mjs"
 import { makePasteImportMethod } from "./src/paste-import.mjs"
 
-/** `config` 钩子：只描述供应商本身，不发请求。 */
+/**
+ * `config` 钩子：声明供应商本身与模型基址，**不发请求**。
+ *
+ * # ⚠ 必须原地改，不能返回新对象（真机事故 2026-11-21）
+ *
+ * 宿主是这样调它的（`host.js` L1567-1571）：
+ *
+ *	await inTime(() => h.hooks.config(config), …)   // ← 返回值被丢弃
+ *	ownConfig.set(ownKey(h.spec, id), config.provider?.[id])   // ← 读的是入参本身
+ *
+ * 所以「返回一个新对象」= 白写：这次的 quilt 一直没进 magpie 的供应商配置。
+ * magpie 能正常发请求，是因为 `provider.models` 返回的模型条目自带 `api.url`，
+ * 恰好绕过了这个缺失 —— 界面上 quwork 的 API 地址一直是空的。
+ *
+ * 正确写法与 loomy / officeace / codearts 三家一致：改 `cfg.provider[PROVIDER]`。
+ * 用 `??=` / 展开旧值，是为了不覆盖用户在 plugins.json 里手写的条目。
+ */
 function makeConfigHook(opts = {}) {
-  return (provider) => {
-    const prior = provider ?? {}
-    return {
+  const api = String(opts.modelBaseUrl ?? "").trim() || MODEL_BASE_URL
+  return (cfg) => {
+    if (!cfg || typeof cfg !== "object") return
+    cfg.provider ??= {}
+    // ⚠ 不整体替换：用户可能已经在 plugins.json 里写了 name / npm / 其它字段
+    const prior = cfg.provider[PROVIDER] ?? {}
+    cfg.provider[PROVIDER] = {
       ...prior,
       name: prior.name || "QuWork",
-      baseURL: opts.modelBaseUrl || MODEL_BASE_URL,
-      options: {
-        ...(prior.options ?? {}),
-        baseURL: opts.modelBaseUrl || MODEL_BASE_URL,
-      },
+      baseURL: api,
+      options: { ...(prior.options ?? {}), baseURL: api },
     }
   }
 }

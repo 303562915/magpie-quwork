@@ -76,12 +76,16 @@ test("chat 用 MODEL_BASE_URL；平台接口用 PLATFORM_BASE_URL（同一次装
   assert.equal(urls[1], `${PLATFORM_BASE_URL}/api/user/self`)
 })
 
-test("config 钩子把 baseURL 指向模型平面", async () => {
+test("config 钩子把 baseURL 指向模型平面（原地改入参，不返回新对象）", async () => {
   const p = await QuWorkAuthPlugin({}, {})
-  const cfg = p.config({})
-  assert.equal(cfg.baseURL, MODEL_BASE_URL)
-  assert.equal(cfg.options.baseURL, MODEL_BASE_URL)
-  assert.equal(cfg.name, "QuWork")
+  // ⚠ 宿主丢弃 config() 的返回值，只读被改过的 cfg 本身（host.js L1567-1571）。
+  // 这条断言过去读返回值，等于把一个「什么都没生效」的实现测成了绿的。
+  const cfg = { provider: {} }
+  const ret = p.config(cfg)
+  assert.equal(ret, undefined, "config 不能返回新对象：宿主不会用它")
+  assert.equal(cfg.provider.quwork.baseURL, MODEL_BASE_URL)
+  assert.equal(cfg.provider.quwork.options.baseURL, MODEL_BASE_URL)
+  assert.equal(cfg.provider.quwork.name, "QuWork")
 })
 
 test("插件选项 bodyMode 透传到 loader：passthrough 原样，默认 client-shape 补字段", async () => {

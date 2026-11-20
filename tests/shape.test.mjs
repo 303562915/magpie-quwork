@@ -90,8 +90,11 @@ test("provider.models 接受 (provider, ctx) 参数，返回按 id 索引的对�
   assert.ok(first.limit && typeof first.limit.context === "number")
 })
 
-test("config 接受 provider 参数，返回含 baseURL 的对象", () => {
-  const cfg = p.config({})
-  assert.equal(typeof cfg.baseURL, "string")
-  assert.match(cfg.baseURL, /llm\.quwork\.cn\/v1$/)
+test("config 原地写入 provider 条目（宿主不看返回值）", () => {
+  // ⚠ host.js L1567 丢弃 config() 的返回值，只读它改过的 cfg 本身。
+  const cfg = { provider: {} }
+  const ret = p.config(cfg)
+  assert.equal(ret, undefined, "不能返回新对象：宿主不会用")
+  assert.equal(typeof cfg.provider.quwork.baseURL, "string")
+  assert.match(cfg.provider.quwork.baseURL, /llm\.quwork\.cn\/v1$/)
 })
