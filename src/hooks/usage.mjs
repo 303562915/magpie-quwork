@@ -1,4 +1,4 @@
-// hooks/usage.mjs 额度卡片。
+// hooks/usage.mjs 额度卡片（**每次真实读 `/api/user/self`**；这里没有缓存）。
 //
 // # 两种凭据，两种能力（这是本插件的核心事实）
 //
@@ -10,6 +10,11 @@
 //	· 有 token   → 打 `/api/user/self`，把积分映射成额度窗（aside，不参与路由）
 //	· 只有 llmToken → 给一条 aside 说明窗「只能调模型，读不到积分」
 //
+// # T-39 的界限：只有 `provider.models` 做缓存
+//
+// 曾把额度也改成"只读缓存、没有缓存就回 `说明 · 额度未读`"，用户驳回
+// （「usage 这些也不要改」）⇒ 已恢复原语义：每次被问就真读一次。
+//
 // # 三条硬规则（magpie 契约）
 //
 //	① 成功时**只返回 windows**，绝不顺手塞 `error` —— `error` 会**替代**整个窗口显示
@@ -17,6 +22,7 @@
 //	③ 说明性窗口一律 `aside: true`（不参与路由排序）
 
 import { PLATFORM_BASE_URL, SELF_PATH, PLATFORM_TIMEOUT_MS } from "../constants.mjs"
+import { USAGE_CACHE_FILE, cacheDirOf, writeCacheEntry } from "../cache.mjs"
 
 // ── 窗口命名的三个前缀（T-31：跨插件统一）────────────────────────────────
 //
@@ -165,17 +171,20 @@ export function windowsFromSelf(body) {
 }
 
 /**
- * 造 usage 钩子。
+ * 造「实时读额度」的函数（**打上游**）。
+ *
+ * ⚠ 它**就是** `auth.usage` 的实现 —— 额度钩子每次被问都真读一次上游。
+ *   （T-39 曾把它拆出来让钩子只读缓存，用户驳回了：usage 不动。）
  *
  * @param {{platformBaseUrl?: string, log?: any, fetchImpl?: typeof fetch}} [opts]
  * @returns {(getAuth: () => Promise<any>) => Promise<{windows: object[]}>}
  */
-export function makeUsageHook(opts = {}) {
+export function makeUsageReader(opts = {}) {
   const base = String(opts.platformBaseUrl ?? "").trim().replace(/\/+$/, "") || PLATFORM_BASE_URL
   const doFetch = opts.fetchImpl ?? ((...args) => globalThis.fetch(...args))
   const log = opts.log ?? console
 
-  return async function usage(getAuth) {
+  return async function readUsage(getAuth) {
     const auth = await getAuth()
     // 平台 token：`token`（落盘）或 `refresh`（magpie 存的那个）都认
     const token = String(auth?.token ?? auth?.refresh ?? "").trim()
@@ -262,4 +271,59 @@ export function makeUsageHook(opts = {}) {
       }
     }
   }
+}
+
+/**
+ * 「额度未读」说明窗（**备用**导出）。
+ *
+ * ⚠ 当前 `auth.usage` **不返回**它：额度钩子每次都真读上游（用户驳回缓存化）。
+ *   这里保留导出只是为了让别的调用方（如将来的面板产物）能复用同一条命名。
+ *
+ * @param {string} [display] 告诉用户怎么读（各入口不同）
+ * @returns {{name: string, aside: true, display: string}}
+ */
+export function unreadUsageWindow(display = "点面板「刷新」读取") {
+  return { name: `${NOTE_PREFIX}额度未读`, aside: true, display: String(display) }
+}
+
+/**
+ * 造 usage 钩子（**每次真实读 `/api/user/self`**）。
+ *
+ * # 这里没有缓存（用户明确要求）
+ *
+ * T-39 一度让它只读 `quwork-usage-cache.json`，没有缓存就回「额度未读」。
+ * 用户驳回：「usage 这些也不要改」。所以恢复原语义：每次被问就真读一次
+ * （`makeUsageReader` 就是它）。
+ *
+ * ⚠ `configDir` 仍然被接受但**不参与读取** —— 只有 `server.mjs` 的「刷新」按钮
+ *   会顺手写一份 `quwork-usage-cache.json`（零额外请求的副产品），这个钩子不读它。
+ *
+ * @param {{platformBaseUrl?: string, configDir?: string, log?: any, fetchImpl?: typeof fetch}} [opts]
+ * @returns {(getAuth: () => Promise<any>) => Promise<{windows: object[]}>}
+ */
+export function makeUsageHook(opts = {}) {
+  return makeUsageReader(opts)
+}
+
+/**
+ * 面板刷新用：把一次 `/api/user/self` 的响应写进额度缓存。
+ *
+ * ⚠ 这是**面板副产品**（`server.mjs` 的 `/api/accounts/refresh` 复用同一份响应写），
+ *   `auth.usage` 不读它 —— 它只是给以后可能出现的面板/排障用途留的一份快照。
+ *
+ * @param {{configDir?: string, accountKey?: any, windows?: object[], plan?: string, user?: string}} input
+ * @returns {boolean}
+ */
+export function rememberUsage(input = {}) {
+  const configDir = cacheDirOf(input.configDir)
+  const key = String(input.accountKey ?? "").trim()
+  if (!configDir || !key) return false
+  const windows = Array.isArray(input.windows) ? input.windows : []
+  if (windows.length === 0) return false
+  return writeCacheEntry(configDir, USAGE_CACHE_FILE, key, {
+    at: Date.now(),
+    windows,
+    ...(input.plan ? { plan: String(input.plan) } : {}),
+    ...(input.user ? { user: String(input.user) } : {}),
+  })
 }

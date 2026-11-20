@@ -637,7 +637,8 @@ export const QuWorkAuthPlugin = async (input = {}, options = {}) => {
         now: typeof options?.now === "function" ? options.now : undefined,
       }),
       loader: makeLoaderHook({ modelBaseUrl, log, refresh, bodyMode }),
-      usage: makeUsageHook({ platformBaseUrl, log }),
+      // T-39：额度**只读缓存**（`quwork-usage-cache.json`）。缓存由面板「刷新」写。
+      usage: makeUsageHook({ platformBaseUrl, configDir, log }),
       // 界面开关（真源见文件头「# auth.options」）。**必须**挂在 `auth` 上，
       // 挂在返回对象顶层等于没写（`optionsOf(a.auth)`）。
       options: AUTH_OPTIONS.map((o) => ({ ...o })),
@@ -658,7 +659,8 @@ export const QuWorkAuthPlugin = async (input = {}, options = {}) => {
     },
     provider: {
       id: PROVIDER,
-      models: makeModelsHook({ modelBaseUrl, log }),
+      // T-39：目录**只读缓存**（`quwork-models-cache.json`）；未命中才拉 1 次并写缓存。
+      models: makeModelsHook({ modelBaseUrl, configDir, log }),
     },
   }
 

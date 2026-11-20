@@ -9,6 +9,12 @@
 //	· `expire` 缺失时客户端按 **2 小时**算（`DEFAULT_ACCESS_TOKEN_TTL_MS`）
 //	· 剩余 **< 1 小时** 就该续（`ACCESS_TOKEN_REFRESH_WINDOW_MS`）
 //
+// # 续期不动（用户明确驳回「只有过期才续」）
+//
+// T-39 一度把闸门改成"已过期才续"，用户驳回：「那个续期的没有问题，不要改」。
+// 所以恢复客户端口径：**临期（剩余 < 1 小时）就续** —— 这是客户端自己的行为，
+// 跟着它走才不会被平台当成异类。本次只对 `provider.models` 做了缓存化。
+//
 // # 三条自律
 //
 //	① 60 秒内最多一次（并发请求不该各续一次，否则可能互相把 token 换废）
@@ -17,6 +23,7 @@
 
 import { PLATFORM_BASE_URL, REFRESH_PATH, REFRESH_THROTTLE_MS, REFRESH_WINDOW_MS, PLATFORM_TIMEOUT_MS, TOKEN_TTL_MS } from "./constants.mjs"
 import { updatePlatformToken } from "./auth-store.mjs"
+import { pastHalfLife, readJwtClaims } from "./token-life.mjs"
 
 /**
  * 算出 token 的过期时间（秒级时间戳）。
@@ -33,13 +40,25 @@ export function expiresAtOf({ expire = 0, issuedAt = Date.now() } = {}) {
 }
 
 /**
- * 现在是否该续期（与客户端 `isRefreshDue` 同口径）。
+ * 现在是否该续期 —— **T-41：走完总有效期的 50% 才续**。
  *
- * @param {number} expiresAtSec 秒级过期时间
- * @param {{nowMs?: number, windowMs?: number}} [opts]
- * @returns {boolean} true = 剩余不足 windowMs（或已过期）
+ *	① 给了 `iatSec`（签发时间）且 total > 0 → 严格 50%（`pastHalfLife`）
+ *	② 没给 iat → 回落到 `windowMs`（老口径，默认 1 小时）作为兜底
+ *
+ * ⚠ 兜底只在"拿不到签发时间"时生效；有 iat 就必须按 50% 走。
+ *
+ * @param {number} expiresAtSec 过期时间（秒）
+ * @param {{nowMs?: number, windowMs?: number, iatSec?: number}} [opts]
+ * @returns {boolean} true = 该续了
  */
-export function needsRefresh(expiresAtSec, { nowMs = Date.now(), windowMs = REFRESH_WINDOW_MS } = {}) {
+export function needsRefresh(expiresAtSec, { nowMs = Date.now(), windowMs = REFRESH_WINDOW_MS, iatSec } = {}) {
+  const expSec = Number(expiresAtSec)
+  const iat = Number(iatSec)
+  if (Number.isFinite(expSec) && Number.isFinite(iat) && iat > 0 && expSec > iat) {
+    // ① 有签发时间：严格按百分比（剩余 <= 总长的一半）
+    return pastHalfLife(iat, expSec, Math.floor(nowMs / 1000))
+  }
+  // ② 没有签发时间：固定窗口兜底（不改老行为，只是它不再是主判据）
   const expMs = (Number(expiresAtSec) || 0) * 1000
   return expMs <= nowMs + windowMs
 }
@@ -75,7 +94,11 @@ export function makeRefresher(opts = {}) {
     if (!token || !llmToken) return { refreshed: false, reason: "no-platform-token" }
 
     const expiresAt = expiresAtOf({ expire: auth?.expire, issuedAt: now() })
-    if (!needsRefresh(expiresAt, { nowMs: now() })) return { refreshed: false, reason: "not-due" }
+    // T-41：签发时间优先取 JWT 的 `iat`（平台 token 或模型 token 都可能是 JWT），
+    // 取不到就交给 `needsRefresh` 的固定窗口兜底 —— 有 iat 就必须按 50% 走。
+    const claims = readJwtClaims(auth?.token) ?? readJwtClaims(auth?.llmToken) ?? readJwtClaims(auth?.access)
+    const iatSec = Number(auth?.iat) > 0 ? Number(auth.iat) : claims?.iat
+    if (!needsRefresh(expiresAt, { nowMs: now(), iatSec })) return { refreshed: false, reason: "not-due" }
 
     const stamp = lastTry.get(llmToken) ?? 0
     if (now() - stamp < throttleMs) return { refreshed: false, reason: "throttled" }

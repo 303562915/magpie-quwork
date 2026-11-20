@@ -30,7 +30,8 @@ import {
 } from "./src/invite.mjs"
 import { deviceIdentifierFrom } from "./src/login.mjs"
 import { readAll } from "./src/auth-store.mjs"
-import { windowsFromSelf } from "./src/hooks/usage.mjs"
+import { rememberUsage, windowsFromSelf } from "./src/hooks/usage.mjs"
+import { refreshCatalogCache } from "./src/hooks/models.mjs"
 import { buildAuthorizeUrl, bindWechat, exchangeCode, newState, parseCallback } from "./src/wechat.mjs"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -429,16 +430,55 @@ export function createPageServer(opts = {}) {
           const total = body?.data?.points_entitlement?.total_points
           accounts[key] = { points: total ?? null, at: now() }
           okCount += 1
+          // T-39：**同一个响应**顺手写额度缓存 —— `auth.usage` 只读缓存，
+          // 用户点这一次「刷新」就是它唯一的更新入口（零额外请求）。
+          const rendered = windowsFromSelf(body)
+          if (rendered) {
+            rememberUsage({
+              configDir,
+              accountKey: accountIdOfKey(key) || key,
+              windows: rendered.windows,
+            })
+          }
         } catch (e) {
           accounts[key] = { points: null, at: now(), error: String(e?.message ?? e).slice(0, 120) }
         }
       }
 
+      // T-39：模型目录缓存**不在这里刷**。它是 provider 级资源（1 次请求就够），
+      // 与「刷新选中账号」是两件事 —— 混在一起会让「刷新 1 个账号 = 2 次上游请求」，
+      // 也会破坏「只刷选中账号」这条语义。它有自己的按钮：`/api/models/refresh`。
+
       const stamp = now()
       // 合并：只更新本次刷的那些，别把别的账号的缓存抹掉
       const prev = readJsonFile(accountsCacheFile())?.accounts ?? {}
       writeJsonFile(accountsCacheFile(), { updatedAt: stamp, accounts: { ...prev, ...accounts } })
-      return { ok: true, cached: false, at: stamp, updatedAt: stamp, okCount, total: keys.length, accounts }
+      return {
+        ok: true,
+        cached: false,
+        at: stamp,
+        updatedAt: stamp,
+        okCount,
+        total: keys.length,
+        accounts,
+      }
+    },
+
+    /**
+     * 刷新**模型目录**缓存（T-39）：`provider.models` 只读 `quwork-models-cache.json`，
+     * 这个接口是它唯一的更新入口（面板「刷新模型目录」按钮）。
+     *
+     * 只发 **1 次** `/v1/models`（provider 级，与账号数无关）。
+     */
+    async modelsRefresh() {
+      const all = readAll(configDir)
+      const key = Object.keys(all).find((k) => k === "quwork" || k.startsWith("quwork#"))
+      const llmToken = String(all[key]?.llmToken ?? all[key]?.access ?? "").trim()
+      if (!llmToken) return { ok: false, error: "没有可用的 llmToken（先添加一个账号）" }
+      const r = await refreshCatalogCache({ configDir, llmToken, fetchImpl })
+      return r.ok
+        ? { ok: true, count: r.count ?? 0, at: now() }
+        : { ok: false, error: `目录读取失败（${r.reason ?? "unknown"}）`, at: now() }
     },
 
     /**
@@ -877,6 +917,7 @@ export function createPageServer(opts = {}) {
         const table = {
           accounts: () => api.accounts(),
           "accounts/refresh": (i) => api.accountsRefresh(i),
+          "models/refresh": () => api.modelsRefresh(),
           "accounts/delete": (i) => api.accountsDelete(i),
           settings: (i) => api.settingsSave(i),
           "invite/summary": () => api.summary(),

@@ -856,6 +856,21 @@ on($("refresh-all"), async () => {
   toast("全部已刷新")
 })
 
+// T-39：模型目录缓存**只**从这里更新（`provider.models` 钩子只读缓存）。
+// 1 次 `/v1/models`（与账号数无关）；打开页面时不会自己发。
+on($("refresh-models"), async () => {
+  setStatus("读取模型目录…")
+  const d = await api("/api/models/refresh", {})
+  if (d?.ok) {
+    setStatus(`模型目录已更新（${d.count} 个）`, true)
+    toast(`模型目录已更新（${d.count} 个）`)
+  } else {
+    const msg = String(d?.error || "读取失败")
+    setStatus(msg, false)
+    toast(msg, true)
+  }
+})
+
 // ── 启动：只读缓存（零上游）────────────────────────────────────────────
 ;(async () => {
   try {

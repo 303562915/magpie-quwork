@@ -1,4 +1,4 @@
-// hooks/models.mjs 模型目录：live `/v1/models` → 失败回落静态表。
+// hooks/models.mjs 模型目录：**只读缓存**；缓存没有才拉一次（并写缓存）。
 //
 // # 契约形状（与 magpie-loomy 一致）
 //
@@ -7,6 +7,17 @@
 // 返回的是**按 id 索引的对象**，不是数组 —— magpie 的 provider.models 就是这个形状
 // （照抄 magpie-loomy 的 `toMagpieModels`）。
 //
+// # T-39：缓存优先（用户原话「所有的东西都需要缓存…不要自动更新缓存」）
+//
+//	① 命中 `quwork-models-cache.json` → **直接返回，零上游请求**
+//	② 未命中 → 整个 provider **只拉一次**（模块级 promise 去重：N 个账号并发也只
+//	   1 次请求）→ 成功后写缓存
+//	③ 拉失败（HTTP 错 / 网络错 / 空目录）→ 回落静态表，**不写缓存**（下次还能重试）
+//
+// 判据：magpie 重启后重复读模型列表**不会**对每个账号各打一次上游 —— 有缓存就是 0 次，
+// 没缓存是 1 次（不是账号数）。缓存什么时候更新由用户点面板「刷新」决定（`server.mjs`
+// 的 `/api/models/refresh`）。
+//
 // # 失败回落不是「兜底偷懒」
 //
 // `/v1/models` 的存在性**未验证**（§3.4 只列了 chat，client 里对 404 的处置是
@@ -14,6 +25,7 @@
 // 缓存里的权威 10 个）。目录拉不到绝不能让供应商在界面上变成空。
 
 import { DEFAULT_MODELS, ENV_HEADERS, MODELS_PATH, MODEL_BASE_URL, CATALOG_TIMEOUT_MS } from "../constants.mjs"
+import { MODELS_CACHE_FILE, cacheDirOf, readCacheEntry, writeCacheEntry } from "../cache.mjs"
 
 /**
  * 上游能力声明 → magpie 的两组模态字段（**唯一一处映射**）。
@@ -193,13 +205,58 @@ export async function fetchCatalog(opts) {
 }
 
 /**
- * 造 models 钩子。
+ * 正在飞的那次「拉目录」（T-39 的模块级去重闸）。
  *
- * @param {{modelBaseUrl?: string, log?: any, fetchImpl?: typeof fetch}} [opts]
+ * 键 = `configDir::baseUrl`：同一份缓存目录 + 同一个网关 ⇒ 同一份目录，N 个账号
+ * 并发调用只会真的发 1 次请求（其余等这次的结果）。请求一结束就删键 ——
+ * 失败**不进**缓存、也不留"已失败"标记，下次调用还能重试。
+ *
+ * @type {Map<string, Promise<Array<object>|null>>}
+ */
+const inFlight = new Map()
+
+/**
+ * 拉一次目录（同一网关并发只发一次），成功后写缓存。
+ *
+ * @param {{configDir: string, base: string, llmToken: string, fetchImpl?: typeof fetch, log?: any}} opts
+ * @returns {Promise<Array<object>|null>} null = 没拿到（调用方回落静态表；**不写缓存**）
+ */
+async function loadCatalogOnce(opts) {
+  const key = opts.configDir ? `${opts.configDir}::${opts.base}` : ""
+  const running = key ? inFlight.get(key) : null
+  if (running) return running
+
+  const task = (async () => {
+    const live = await fetchCatalog({
+      modelBaseUrl: opts.base,
+      llmToken: opts.llmToken,
+      fetchImpl: opts.fetchImpl,
+      log: opts.log,
+    })
+    if (!live || live.length === 0) return null
+    // 只有**成功**才写缓存：失败写进去会让"下次还是失败"变成永久状态
+    if (opts.configDir) writeCacheEntry(opts.configDir, MODELS_CACHE_FILE, opts.base, { at: Date.now(), list: live })
+    return live
+  })().finally(() => {
+    if (key) inFlight.delete(key)
+  })
+
+  if (key) inFlight.set(key, task)
+  return task
+}
+
+/**
+ * 造 models 钩子（**只读缓存**）。
+ *
+ * @param {{modelBaseUrl?: string, configDir?: string, log?: any, fetchImpl?: typeof fetch}} [opts]
+ *   `configDir`：缓存目录（magpie 的配置目录）。空 = 没有可写的地方 ⇒ 退回"每次都读"
+ *   （只在测试/嵌入场景出现；生产环境 magpie 一定给 `input.directory`）。
  * @returns {(provider: any, ctx?: {auth?: any}) => Promise<Record<string, object>>}
  */
 export function makeModelsHook(opts = {}) {
   const log = opts.log ?? console
+  const configDir = cacheDirOf(opts.configDir)
+  const base = String(opts.modelBaseUrl ?? "").trim().replace(/\/+$/, "") || MODEL_BASE_URL
 
   return async function models(provider, ctx = {}) {
     const auth = ctx?.auth
@@ -208,13 +265,15 @@ export function makeModelsHook(opts = {}) {
     // 未登录：给静态表（否则界面上这个供应商一个模型都没有）
     if (!llmToken) return toMagpieModels(provider, DEFAULT_MODELS)
 
+    // ① 命中缓存 → 零上游（magpie 重启后就是这条路）
+    const cached = configDir ? readCacheEntry(configDir, MODELS_CACHE_FILE, base) : null
+    if (cached && Array.isArray(cached.list) && cached.list.length > 0) {
+      return toMagpieModels(provider, cached.list)
+    }
+
     try {
-      const live = await fetchCatalog({
-        modelBaseUrl: opts.modelBaseUrl,
-        llmToken,
-        fetchImpl: opts.fetchImpl,
-        log,
-      })
+      // ② 未命中 → 整个 provider 只拉一次 → 写缓存
+      const live = await loadCatalogOnce({ configDir, base, llmToken, fetchImpl: opts.fetchImpl, log })
       if (!live || live.length === 0) return toMagpieModels(provider, DEFAULT_MODELS)
       return toMagpieModels(provider, live)
     } catch (e) {
@@ -223,4 +282,26 @@ export function makeModelsHook(opts = {}) {
       return toMagpieModels(provider, DEFAULT_MODELS)
     }
   }
+}
+
+/**
+ * 面板「刷新模型目录」用的**显式**拉取（T-39）。
+ *
+ * 与钩子的区别只有一条：它**不看缓存**，直接打一次上游并写缓存 ——
+ * 这是"由用户点按钮更新缓存"的唯一入口。
+ *
+ * @param {{configDir?: string, modelBaseUrl?: string, llmToken: string,
+ *   fetchImpl?: typeof fetch, log?: any}} opts
+ * @returns {Promise<{ok: boolean, count?: number, reason?: string}>}
+ */
+export async function refreshCatalogCache(opts = {}) {
+  const configDir = cacheDirOf(opts.configDir)
+  const base = String(opts.modelBaseUrl ?? "").trim().replace(/\/+$/, "") || MODEL_BASE_URL
+  const llmToken = String(opts.llmToken ?? "").trim()
+  if (!llmToken) return { ok: false, reason: "missing-llmToken" }
+
+  const live = await fetchCatalog({ modelBaseUrl: base, llmToken, fetchImpl: opts.fetchImpl, log: opts.log })
+  if (!live || live.length === 0) return { ok: false, reason: "empty-catalog" }
+  const written = configDir ? writeCacheEntry(configDir, MODELS_CACHE_FILE, base, { at: Date.now(), list: live }) : false
+  return { ok: true, count: live.length, cached: written }
 }
