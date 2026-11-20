@@ -1,0 +1,41 @@
+{
+  "name": "magpie-quwork",
+  "version": "0.1.0",
+  "description": "QuWork（qurvis）provider plugin for magpie：粘贴 llm_token 即可调模型，可选平台 token 显示积分并按需续期",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": "./index.mjs",
+  "files": [
+    "index.mjs",
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "magpie",
+    "magpie-plugin",
+    "opencode",
+    "quwork",
+    "qurvis",
+    "provider",
+    "auth"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "magpie": {
+    "name": "QuWork",
+    "maxConcurrency": 4,
+    "summary": {
+      "en": "QuWork (qurvis): paste an llm_token to call its OpenAI-compatible models; an optional platform token adds credit display and refresh.",
+      "zh": "QuWork（qurvis）：粘贴 llm_token 即可调用其 OpenAI 兼容模型；可选平台 token 用于显示积分与自动续期。"
+    },
+    "options": {
+      "baseUrl": "https://llm.quwork.cn/v1",
+      "platformBaseUrl": "https://llm.rrzu.com"
+    }
+  }
+}
