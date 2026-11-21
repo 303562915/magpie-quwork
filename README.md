@@ -1,5 +1,7 @@
 # magpie-quwork
 
+> **改这个插件前先读 [AGENTS.md](./AGENTS.md)** —— 尤其是「不要重启 magpie」那一条。
+
 把 **QuWork（qurvis）** 的模型额度接成 magpie 的可路由供应商。
 
 > 一句话：**一个 `llm_token` 就能调模型；平台 `token` 只影响额度显示与续期。**
