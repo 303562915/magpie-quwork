@@ -99,7 +99,7 @@ test("带上客户端公共头（X-QurWork-*）；不覆盖调用方已有的值
   assert.equal(h.get("accept"), "application/json")
 })
 
-test("客户端 UA：pi/1.5.0 (win32; node/…) 形态；**不带** traceparent / x-request-id", async () => {
+test("客户端 UA：pi/1.5.0 (<真实平台>; node/…) 形态；**不带** traceparent / x-request-id", async () => {
   const { calls, fetchImpl } = capture()
   const loader = await loaderWith({ fetchImpl })
 
@@ -107,7 +107,10 @@ test("客户端 UA：pi/1.5.0 (win32; node/…) 形态；**不带** traceparent 
 
   const h = new Headers(calls[0].init.headers)
   const ua = String(h.get("user-agent"))
-  assert.match(ua, /^pi\/1\.5\.0 \(win32; node\//, `UA 形态不对: ${ua}`)
+  // 平台段用运行时真实值：pi-ai 的 formatUserAgent() 就是拼 process.platform，
+  // Windows 上是 win32、Linux 上是 linux —— 写死 win32 反而露馅（见 constants.mjs 注释）。
+  const platform = String(process.platform).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  assert.match(ua, new RegExp(`^pi/1\\.5\\.0 \\(${platform}; node/`), `UA 形态不对: ${ua}`)
   // 运行时真实版本，不硬编码
   assert.ok(ua.includes(`node/v${process.versions.node}`), `UA 里的 node 版本应是运行时真实版本: ${ua}`)
 
