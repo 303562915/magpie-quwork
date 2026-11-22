@@ -72,7 +72,12 @@
 
   try {
     const s = window.magpie?.service
-    if (typeof s === "string" && /^https?:\/\//.test(s)) service = s
+    if (typeof s === "string" && s) {
+      // magpie web 给的是**相对页面**的路径（如 `_magpie/service/`），
+      // 必须按当前页面 URL 解析成绝对地址；绝对 http(s) 也照收。
+      const resolved = new URL(s, location.href)
+      if (/^https?:$/.test(resolved.protocol)) service = resolved.href
+    }
   } catch {
     // 桌面窗口直接跳 loopback
   }

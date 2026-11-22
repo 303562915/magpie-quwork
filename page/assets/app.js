@@ -34,35 +34,38 @@ const daysLeft = (sec) => {
 }
 
 /**
- * 面板服务的 origin。
+ * 面板服务的根地址（含 magpie 反代前缀）。
  *
- * # 为什么不能直接用相对路径（真机踩过）
+ * # 为什么用 import.meta.url（真机踩过）
  *
- * magpie 打开面板时，页面**不一定**由 `127.0.0.1:<port>` 提供：带路页/宿主 origin/
- * `file:` 都可能。相对路径 `fetch("/api/...")` 于是打到**页面所在 origin**，
- * 得到 404 → `api()` 抛错 → 表格永远停在「加载中…」。
+ * app.js 是 `<script type="module">`，**module 里 document.currentScript 恒为 null**，
+ * 旧代码的 `currentScript.src` 分支永远不生效，于是回退到 location.origin —— 在
+ * magpie web 下那是 8090，请求打到 `http://H:8090/api/accounts` → Failed to fetch。
  *
- * 所以照 magpie-loomy 的做法：从**脚本自身 URL** 取 origin（`<script src>` 由面板
- * 服务发出，origin 就是它）。另外支持 `?port=`（boot.js 跳转时带上）作为更稳的来源，
- * 最后才退化成同源 / 本机默认端口。
+ * 正确做法：取本模块自身 URL 的**上一级目录**当服务根。本地与反代两种形态都对：
+ *   · http://127.0.0.1:4392/assets/app.js → http://127.0.0.1:4392
+ *   · http://H/_magpie/plugin/<hash>/_magpie/service/assets/app.js
+ *     → http://H/_magpie/plugin/<hash>/_magpie/service
+ *
+ * 仍然支持 `?port=`：只在取不到 http 的 file:// 场景作为回退。
  */
 const BASE = (() => {
-  // ① boot.js 跳转时带的 ?port=（最可靠：服务自己写的端口）
+  // ① 本模块自身 URL 的上一级目录 = 面板服务根（自动带 magpie 反代前缀）。
+  //    module 里 document.currentScript 恒为 null，必须用 import.meta.url。
+  try {
+    const self = new URL(import.meta.url)
+    if (/^https?:$/.test(self.protocol)) return new URL("..", self).href.replace(/\/+$/, "")
+  } catch {
+    /* 忽略 */
+  }
+  // ② file:// / 取不到 http → 桌面窗口：用 boot 带来的 ?port=，否则默认 4392
   try {
     const p = Number(new URLSearchParams(location.search).get("port"))
     if (Number.isInteger(p) && p > 0 && p < 65536) return `http://127.0.0.1:${p}`
   } catch {
     /* 忽略 */
   }
-  // ② 脚本自身 URL 的 origin（loomy 的做法）
-  try {
-    const src = document.currentScript?.src
-    if (src && /^https?:/.test(src)) return new URL(src).origin
-  } catch {
-    /* 忽略 */
-  }
-  // ③ 同源（由面板服务提供时）→ ④ 本机默认端口
-  return location.origin && location.origin !== "null" ? location.origin : "http://127.0.0.1:4392"
+  return "http://127.0.0.1:4392"
 })()
 
 /**
