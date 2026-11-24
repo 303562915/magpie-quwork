@@ -315,11 +315,40 @@ test("T-31：所有窗口名都必须以「额度 · / 停用 · / 说明 · 」
     }
   }
 
-  // ③ quwork 一个「停用」窗都不该有：它没有判死一个号的依据（规范 §4.3 第 2 条）
-  assert.equal(seen.filter((s) => s.name.startsWith(STOP_PREFIX)).length, 0, "quwork 不许伪造 used:100")
+  // ③ 只允许「停用 · 额度耗尽」一种停用窗（余额 0 是真实证据）；其它停用窗不许出现
+  for (const s of seen.filter((x) => x.name.startsWith(STOP_PREFIX))) {
+    assert.match(s.name, /^停用 · 额度耗尽$/, "只允许「停用 · 额度耗尽」，其余停用窗等于判死无依据的号")
+  }
 
   // ④ 三个前缀里至少要出现两个（本文件真的覆盖到了说明窗与额度窗）
   for (const p of [QUOTA_PREFIX, NOTE_PREFIX]) {
     assert.ok(seen.some((s) => s.name.startsWith(p)), `本文件没有产出过「${p}…」窗口，一致性测试名存实亡`)
   }
+})
+
+// ── 额度耗尽 → 停用窗（让路由跳过；余额 0 是真实证据，不是伪造）──────────────
+test("余额为 0 且无订阅 → 补「停用 · 额度耗尽」（used:100 + 未来 resetsAt）", async () => {
+  const u = await usageWith(async () =>
+    Response.json({ data: { points_entitlement: { total_points: "0.00" } } }),
+  )(async () => ({ llmToken: LLM, token: TOKEN }))
+  const stop = u.windows.find((w) => String(w.name).startsWith(STOP_PREFIX))
+  assert.ok(stop, "余额 0 必须出现停用窗，否则路由仍会派活")
+  assert.equal(stop.used, 100)
+  assert.equal(stop.limit, 100)
+  assert.equal(stop.aside, undefined, "停用窗必须参与路由，不能 aside")
+  assert.ok(Date.parse(stop.resetsAt) > Date.now(), "resetsAt 必须在未来，否则 magpie 不认")
+})
+
+test("余额 > 0 → 没有停用窗", async () => {
+  const u = await usageWith(async () => Response.json({ data: { points: 100 } }))(
+    async () => ({ llmToken: LLM, token: TOKEN }),
+  )
+  assert.equal(u.windows.filter((w) => String(w.name).startsWith(STOP_PREFIX)).length, 0)
+})
+
+test("余额 0 但仍有订阅 → 不加停用窗（避免误杀）", async () => {
+  const u = await usageWith(async () =>
+    Response.json({ data: { points_entitlement: { total_points: "0", active_subscription: { name: "标准版" } } } }),
+  )(async () => ({ llmToken: LLM, token: TOKEN }))
+  assert.equal(u.windows.filter((w) => String(w.name).startsWith(STOP_PREFIX)).length, 0)
 })

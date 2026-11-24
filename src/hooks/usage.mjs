@@ -21,7 +21,7 @@
 //	② 绝不伪造 `used: 100` 的额度窗（那是「把号判死」，我们没有任何依据）
 //	③ 说明性窗口一律 `aside: true`（不参与路由排序）
 
-import { PLATFORM_BASE_URL, SELF_PATH, PLATFORM_TIMEOUT_MS } from "../constants.mjs"
+import { PLATFORM_BASE_URL, SELF_PATH, PLATFORM_TIMEOUT_MS, EXHAUSTED_REST_MS } from "../constants.mjs"
 import { USAGE_CACHE_FILE, cacheDirOf, writeCacheEntry } from "../cache.mjs"
 
 // ── 窗口命名的三个前缀（T-31：跨插件统一）────────────────────────────────
@@ -32,8 +32,9 @@ import { USAGE_CACHE_FILE, cacheDirOf, writeCacheEntry } from "../cache.mjs"
 //	停用 · <原因>   `used: 100` —— **让路由跳过该号**的唯一手段（规范 §4.4）
 //	说明 · <主题>   `aside: true` —— 只解释，不参与路由
 //
-// ⚠ quwork **没有任何 `停用 · ` 窗口**：积分是预付费钱包（只有 `balance`），
-//   本插件没有任何依据说「这个号不能用了」——伪造 `used:100` 会把健康的号判死（规范 §4.3 第 2 条）。
+// ⚠ 余额为 0 且无订阅时，补一条 `停用 · 额度耗尽`（used:100 + resetsAt），让路由跳过该号——
+//   这是**真实证据**（钱包见底），不是伪造；resetsAt 到期 magpie 重读额度，充值后自动恢复。
+//   余额 > 0 或仍有订阅额度时绝不加停用窗，避免误杀健康号（规范 §4.3 第 2 条）。
 // ⚠ 名字里**不写数值**（`剩 N` 之类），magpie 自己会按 amount/limit/balance 渲染。
 export const QUOTA_PREFIX = "额度 · "
 export const STOP_PREFIX = "停用 · "
@@ -149,6 +150,18 @@ export function windowsFromSelf(body) {
       display: `${fmtPoints(e.total)} 积分`,
     },
   ]
+  // 余额为 0 且没有可用订阅：积分池见底，模型调用会被上游拒绝。
+  // 补一条 `停用 · 额度耗尽`（used/limit 都 100 ⇒ used 100%），让路由跳过该号；
+  // resetsAt 到期后 magpie 重读额度，充值即恢复。余额 > 0 或仍有订阅时不加。
+  if (Number(e.total) <= 0 && !e.subscription) {
+    windows.push({
+      name: `${STOP_PREFIX}额度耗尽`,
+      used: 100,
+      limit: 100,
+      resetsAt: new Date(Date.now() + EXHAUSTED_REST_MS).toISOString(),
+      display: "积分已用完，充值后自动恢复",
+    })
+  }
   // 「永久积分 / 受限积分」是**同一份额度的拆分**，各自没有总量 ⇒ aside（不参与路由）。
   // ⚠ 字段一个不动（T-31 只改名字）：仍是 `aside:true` + `display`，不补 amount/limit ——
   //   补了就等于替 magpie 编一个分母，那属于 P1「额度窗语义」的活，不混进纯改名。
