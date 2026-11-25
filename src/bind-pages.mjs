@@ -160,7 +160,7 @@ export function goPage(opts) {
     <small>从相册选图 / 长按识别 打开的**无效**，扫了也不会跳「确认登录」</small>
   </div>
   <p class="big">扫完在微信里点「<span class="ok">确认登录</span>」</p>
-  <p class="hint">如果身边只有这一台手机：请把这张码截图发给朋友，让朋友用他的微信扫。</p>
+  <p class="hint">如果身边只有这一台手机：用**电脑**打开 <code>${esc(go)}</code>，再用手机微信扫电脑屏幕上的那张码。</p>
   <p class="hint">剩余时间 <span class="timer" id="left">--:--</span>，超时请重新扫码。</p>
   <p class="hint" id="poll">正在等待确认…</p>
   <a class="btn" id="done" style="display:none" href="${esc(go)}">再帮我们绑一个</a>
