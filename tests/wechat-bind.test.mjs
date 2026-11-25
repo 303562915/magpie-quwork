@@ -659,7 +659,7 @@ test("§26 /bind/qr.png?scale=16 出的是打印用大图（IHDR 尺寸更大）
   // PNG: 8 字节签名 + 4 长度 + 4 类型("IHDR") + 4 宽 + 4 高
   const width = (buf) => buf.readUInt32BE(16)
   assert.ok(width(big) > width(small), `大图应更宽：${width(big)} vs ${width(small)}`)
-  assert.ok(big.length > small.length * 4, "打印图字节数应明显更大")
+  assert.equal(width(big), width(small) * 4, "scale 从 4 到 16，宽度应正好是 4 倍")
 })
 //
 // 面板整体是 `Access-Control-Allow-Origin: *`（file: 加载必须），但管理接口一旦也通配，

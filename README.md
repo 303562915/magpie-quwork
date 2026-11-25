@@ -436,6 +436,44 @@ curl -s http://127.0.0.1:4392/任意路径 | head -c 60   # SPA 兜底：回面�
 > 后果：**配了 token 又走反代时，面板里的「扫码绑定」tab 读不到池子**（它不会带 token）。
 > 看池子请直连本机端口，或临时清掉 `QUWORK_BIND_ADMIN_TOKEN`。
 
+### 公网怎么发布（**别把面板端口反代出去**）
+
+面板服务（4392/4393）同一个端口上还挂着 `/api/accounts`、`/api/invite/*`、`/api/settings`
+—— 那些没有登录态，只靠「本机回环」自保。把它整个反代出去 = 账号表、邀请码、设置对全网开放。
+
+所以公网只跑**门户专用进程**（只有 `/bind*`，别的什么都没有）：
+
+```bash
+# 本机（或 VPS）起一个只管门户的进程，默认 127.0.0.1:4400
+PORT=4400 QUWORK_BIND_PUBLIC_URL=https://bind.example.com node scripts/bind-server.mjs
+
+# VPS 上直接对外（前面再挂 nginx 做 HTTPS）
+HOST=0.0.0.0 PORT=4400 QUWORK_BIND_PUBLIC_URL=https://bind.example.com \
+  node scripts/bind-server.mjs
+```
+
+`npm run bind-server` 等价于 `node scripts/bind-server.mjs`。
+
+Nginx（VPS 形态）：
+
+```nginx
+location /bind {
+    proxy_pass http://127.0.0.1:4400;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+}
+```
+
+本机没有公网 IP 也可以用隧道（**只把 4400 指出去**）：
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:4400     # 临时域名，每次变 → 只适合试扫
+```
+
+> ⚠ 临时隧道每次重启换域名，而固定二维码的图案是**跟着域名变**的。
+> 要让二维码永久不变，必须用**你自己的域名**（命名隧道或 VPS + 证书）。
+
 ### 公网地址怎么配（**不用重启 magpie**）
 
 优先级：环境变量 `QUWORK_BIND_PUBLIC_URL` > 面板设置里的 `bindPublicUrl` > 请求头。
@@ -508,7 +546,7 @@ location /bind {
 
 ```bash
 cd D:\project_GIT\magpie-plugins\magpie-quwork
-node --test            # 全绿（当前 265 条）
+node --test            # 全绿（当前 271 条）
 node -e "import('./index.mjs').then(m=>console.log(Object.keys(m)))"
 # → [ 'QuWorkAuthPlugin', '_internal' ]
 ```
@@ -534,7 +572,9 @@ src/refresh.mjs            续期（2h 兜底 / <1h 触发 / 60s 节流）
 src/wechat-bind.mjs        绑定门户：账号池快照 / 占位锁 / 会话 / 平台签发 state
 src/bind-pages.mjs         门户 HTML（落地页 / 出码页 / 没号页 / 出错页，手机优先）
 src/qr.mjs                 零依赖二维码编码器（字节模式，版本 1~10，ECC L/M/Q/H）+ PNG
-tests/*.test.mjs           265 条
+scripts/bind-server.mjs    门户专用进程（只服务 /bind*，公网只暴露它）
+scripts/bind-qr.mjs        印固定码：PNG + A4 打印页
+tests/*.test.mjs           271 条
 ```
 
 ## 9. 出处
