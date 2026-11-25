@@ -5,7 +5,7 @@
 
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -111,6 +111,46 @@ test("B5 normalizePublicUrl：只认 http(s)、去尾斜杠、拦垃圾", () => 
   assert.equal(normalizePublicUrl("ftp://a.example"), "")
   assert.equal(normalizePublicUrl("javascript:alert(1)"), "")
   assert.equal(normalizePublicUrl(""), "")
+})
+
+test("B7 访问日志：一行一次请求，带 UA 分类（能看出是微信扫的还是脚本探的）", async (t) => {
+  const logFile = join(tempDir(t), "access.log")
+  const platform = fakeFetch()
+  const server = createBindServer({
+    configDir: seed(t),
+    platformBaseUrl: PLATFORM,
+    fetchImpl: platform.fetchImpl,
+    logFile,
+    allocateWindowMs: 0,
+    checkWindowMs: 0,
+    log: { warn() {} },
+  })
+  await new Promise((done) => server.listen(0, "127.0.0.1", done))
+  const base = `http://127.0.0.1:${server.address().port}`
+  t.after(() => new Promise((done) => server.close(() => done())))
+
+  await fetch(`${base}/bind`, { headers: { "user-agent": "Mozilla/5.0 MicroMessenger/8.0.49" } })
+  await fetch(`${base}/bind/go`, { headers: { "user-agent": "curl/8.4.0" } })
+  await new Promise((done) => setTimeout(done, 100))
+
+  const lines = readFileSync(logFile, "utf8").trim().split("\n")
+  assert.equal(lines.length, 2, `应有 2 行日志，实际：${lines.join(" | ")}`)
+  assert.match(lines[0], /\/bind 200/, "第一行是 /bind")
+  assert.match(lines[0], /微信/, "MicroMessenger 要标成微信")
+  assert.match(lines[1], /\/bind\/go 200/)
+  assert.match(lines[1], /脚本/, "curl 要标成脚本")
+})
+
+test("B8 库模式默认不写访问日志（测试/嵌入时不该往仓库落文件）", async (t) => {
+  const dir = seed(t)
+  const platform = fakeFetch()
+  const server = createBindServer({ configDir: dir, platformBaseUrl: PLATFORM, fetchImpl: platform.fetchImpl, allocateWindowMs: 0, checkWindowMs: 0, log: { warn() {} } })
+  await new Promise((done) => server.listen(0, "127.0.0.1", done))
+  const base = `http://127.0.0.1:${server.address().port}`
+  t.after(() => new Promise((done) => server.close(() => done())))
+
+  await fetch(`${base}/bind`)
+  assert.equal(existsSync(join(process.cwd(), "bind-access.log")), false, "不该在 cwd 落日志")
 })
 
 test("B6 会话过期后 check 返回 expired（不是一直 pending）", async (t) => {

@@ -20,7 +20,8 @@
 //	/bind、/bind/go、/bind/qr.png、/bind/api/check、/bind/api/pool|sync（管理接口，带鉴权）。
 
 import { createServer } from "node:http"
-import { join } from "node:path"
+import { appendFileSync, mkdirSync } from "node:fs"
+import { dirname, join } from "node:path"
 import { homedir } from "node:os"
 import { pathToFileURL } from "node:url"
 
@@ -64,6 +65,16 @@ export function createBindServer(opts = {}) {
   const publicBaseUrl = normalizePublicUrl(opts.publicBaseUrl ?? process.env.QUWORK_BIND_PUBLIC_URL)
   const now = typeof opts.now === "function" ? opts.now : () => Date.now()
   const log = opts.log ?? console
+  /**
+   * 访问日志文件（每行一次请求：时间 / IP / 方法 / 路径 / 状态 / 耗时 / UA）。
+   *
+   * 为什么要有它：这个进程跑在公网，「有没有人扫码」「扫到哪一步」只能靠日志回答。
+   * UA 一栏能直接区分「微信扫码」与「运维自己用 curl/PowerShell 探活」。
+   *
+   * `BIND_LOG=""` 或 `logFile: false` 可关掉；测试默认关（不落盘）。
+   */
+  const logFile =
+    opts.logFile === false ? "" : String(opts.logFile ?? process.env.BIND_LOG ?? "").trim()
 
   const portal = createBindPortal({
     configDir,
@@ -120,6 +131,24 @@ export function createBindServer(opts = {}) {
     const url = new URL(req.url ?? "/", "http://127.0.0.1")
     const path = url.pathname
     const isGet = req.method === "GET" || req.method === "HEAD"
+    const t0 = Date.now()
+
+    // 访问日志：响应结束时写一行（路径里的 session 只留前 6 位，别把整串写进日志）
+    if (logFile) {
+      res.on("finish", () => {
+        const ua = String(req.headers["user-agent"] ?? "").slice(0, 60)
+        const wechat = /MicroMessenger/i.test(ua) ? "微信" : /curl|PowerShell|python|node/i.test(ua) ? "脚本" : "浏览器"
+        const q = url.searchParams.get("session")
+        const cleanPath = q ? `${path}?session=${String(q).slice(0, 6)}…` : path
+        const line = `${new Date().toISOString()} ${ipOf(req)} ${req.method} ${cleanPath} ${res.statusCode} ${Date.now() - t0}ms ${wechat} "${ua}"\n`
+        try {
+          mkdirSync(dirname(logFile), { recursive: true })
+          appendFileSync(logFile, line, "utf8")
+        } catch {
+          /* 日志写不进去不能影响出码 */
+        }
+      })
+    }
 
     try {
       if (path === "/" || path === "/index.html") {
@@ -209,11 +238,14 @@ export function createBindServer(opts = {}) {
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   const port = Number(process.env.PORT ?? 4400)
   const host = String(process.env.HOST ?? "127.0.0.1")
+  // 直接跑时默认写访问日志（库模式/测试默认不落盘）
+  if (!process.env.BIND_LOG) process.env.BIND_LOG = join(process.cwd(), "bind-access.log")
   const server = createBindServer()
   server.listen(port, host, () => {
     const pub = normalizePublicUrl(process.env.QUWORK_BIND_PUBLIC_URL) || `http://${host}:${port}`
     console.log(`绑定门户：http://${host}:${port}/bind`)
     console.log(`固定二维码内容：${pub}/bind/go`)
+    console.log(`访问日志：${process.env.BIND_LOG}`)
     console.log(`（这个进程只服务 /bind*，不含面板的 /api/*）`)
   })
 }
