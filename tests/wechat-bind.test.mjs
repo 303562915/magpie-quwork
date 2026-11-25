@@ -616,7 +616,8 @@ test("§27 出码页必须明确「用微信扫一扫直接扫，相册/长按�
   assert.match(go, /另一台手机/, "要告诉用户拿另一台手机扫")
   // 「长按识别」只能出现在「无效」的语境里，不能作为操作指引出现
   assert.ok(!go.includes("长按上面的二维码"), "不能教用户长按那张码去识别")
-  assert.match(go, /长按识别[^<]*无效/, "提到长按识别时必须明确是无效路径")
+  assert.match(go, /长按识别[\s\S]{0,24}无效/, "提到长按识别时必须明确是无效路径")
+  assert.match(go, /用<strong>电脑<\/strong>打开|用电脑打开/, "单人场景要给出「用电脑打开本页」的解法")
 
   const land = await fetch(`${base}/bind`).then((r) => r.text())
   assert.match(land, /扫一扫/)

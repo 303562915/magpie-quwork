@@ -130,7 +130,7 @@ export function landingPage(opts = {}) {
 <div class="card">
   <span class="badge">微信绑定</span>
   <h1>帮我们绑一个账号</h1>
-  <p>点下面的按钮，页面会分给你一个**还没绑定微信**的账号，再用微信扫它给的码、点「确认登录」就完成了。</p>
+  <p>点下面的按钮，页面会分给你一个<strong>还没绑定微信</strong>的账号，再用微信扫它给的码、点「确认登录」就完成了。</p>
   <div class="alert">必须用微信「扫一扫」直接扫码<small>相册选图 / 长按识别 打开的一律无效</small></div>
   <p class="hint">每个账号只会分给一个人；分到之后 5 分钟内有效，被占用的账号会重新回到池子里。</p>
   <a class="btn" href="${esc(go)}">开始绑定</a>
@@ -157,10 +157,10 @@ export function goPage(opts) {
   <img class="qr" id="qr" src="${esc(opts.qrDataUri)}" alt="微信扫码绑定">
   <div class="alert">
     必须用<b>另一台手机</b>的微信「<b>扫一扫</b>」<br>直接扫上面这张二维码
-    <small>从相册选图 / 长按识别 打开的**无效**，扫了也不会跳「确认登录」</small>
+    <small>从相册选图 / 长按识别 打开的<strong>无效</strong>，扫了也不会跳「确认登录」</small>
   </div>
   <p class="big">扫完在微信里点「<span class="ok">确认登录</span>」</p>
-  <p class="hint">如果身边只有这一台手机：用**电脑**打开 <code>${esc(go)}</code>，再用手机微信扫电脑屏幕上的那张码。</p>
+  <p class="hint">如果身边只有这一台手机：用<strong>电脑</strong>打开 <code>${esc(go)}</code>，再用手机微信扫电脑屏幕上的那张码。</p>
   <p class="hint">剩余时间 <span class="timer" id="left">--:--</span>，超时请重新扫码。</p>
   <p class="hint" id="poll">正在等待确认…</p>
   <a class="btn" id="done" style="display:none" href="${esc(go)}">再帮我们绑一个</a>
