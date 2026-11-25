@@ -80,7 +80,10 @@ test("B2 /bind/go 出码时用的是该账号的平台 token，页面不出手�
   assert.match(html, /待绑定账号 #1/)
   assert.match(html, /data:image\/png;base64,/)
   assert.ok(!html.includes("17000000001"), "不能出现手机号")
-  assert.equal(platform.calls.filter((c) => c.p === "/api/oauth/wechat/url").length, 1)
+  // 取授权地址必须用**这个号**的 token（真机踩过：用错字段会 401）
+  const urlCalls = platform.calls.filter((c) => c.p === "/api/oauth/wechat/url")
+  assert.ok(urlCalls.length >= 1, "至少要取一次授权地址")
+  assert.deepEqual([...new Set(urlCalls.map((c) => c.token))], ["tok-a"], "只该用 #1 的 token")
 })
 
 test("B3 固定码：publicBaseUrl 生效，图案字节恒定", async (t) => {

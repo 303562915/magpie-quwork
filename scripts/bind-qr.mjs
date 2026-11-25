@@ -45,14 +45,16 @@ export function normalizeBase(v) {
 /**
  * 出「固定码」三件套：PNG、A4 打印页、二维码里真正编码的 URL。
  *
- * @param {{publicBaseUrl: string, outPng: string}} opts
+ * @param {{publicBaseUrl: string, outPng: string, entryPath?: string}} opts
+ *   `entryPath`：二维码指向哪一条（默认 `/bind/go`；发群里建议 `/bind/wall`）。
  * @returns {{ok: boolean, reason?: string, target?: string, png?: string, html?: string, version?: number, bytes?: number}}
  */
 export function buildFixedQr(opts) {
   const base = normalizeBase(opts?.publicBaseUrl)
   if (!base) return { ok: false, reason: "公网地址不合法（必须是 http(s)://…）" }
 
-  const target = `${base}/bind/go`
+  const entry = String(opts?.entryPath ?? "/bind/go").startsWith("/") ? String(opts.entryPath ?? "/bind/go") : "/bind/go"
+  const target = `${base}${entry}`
   const out = resolve(String(opts.outPng))
   mkdirSync(dirname(out), { recursive: true })
 
@@ -103,7 +105,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   const rawArg = process.argv[2] ?? process.env.QUWORK_BIND_PUBLIC_URL ?? ""
   const outArg = process.argv[3] ?? "fixed-qr.png"
 
-  const r = buildFixedQr({ publicBaseUrl: rawArg, outPng: outArg })
+  const r = buildFixedQr({ publicBaseUrl: rawArg, outPng: outArg, entryPath: process.env.BIND_ENTRY_PATH })
   if (!r.ok) {
     console.error(`用法：npm run bind-qr -- https://bind.example.com [输出路径]`)
     console.error(`（${r.reason}）`)

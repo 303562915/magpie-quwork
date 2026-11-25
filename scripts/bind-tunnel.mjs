@@ -64,7 +64,7 @@ function onUrl(url) {
   if (clean === current) return
   current = clean
 
-  const r = buildFixedQr({ publicBaseUrl: clean, outPng: join(outDir, "固定码.png") })
+  const r = buildFixedQr({ publicBaseUrl: clean, outPng: join(outDir, "固定码.png"), entryPath: process.env.BIND_ENTRY_PATH || "/bind/go" })
   if (!r.ok) {
     console.error(`[${stamp()}] 出码失败：${r.reason}`)
     return
