@@ -52,6 +52,8 @@ function fakePlatform(opts = {}) {
   const bound = opts.bound ?? new Set()
   const dead = opts.dead ?? new Set()
   const calls = []
+  /** 每次 `/api/oauth/wechat/url` 返回的那条授权 URL（测试用来核对页面里的二维码）。 */
+  const urls = []
   let seq = 0
 
   const fetchImpl = async (url, init) => {
@@ -78,17 +80,14 @@ function fakePlatform(opts = {}) {
     if (u.pathname === "/api/oauth/wechat/url") {
       seq += 1
       const state = `state-${seq}-${token.slice(-4)}`
-      return Response.json({
-        success: true,
-        data: {
-          url: `https://open.weixin.qq.com/connect/qrconnect?appid=wxac3315fe86ebb901&redirect_uri=https%3A%2F%2Fllm.rrzu.com%2Foauth%2Fwechat&response_type=code&scope=snsapi_login&state=${state}#wechat_redirect`,
-        },
-      })
+      const url = `https://open.weixin.qq.com/connect/qrconnect?appid=wxac3315fe86ebb901&redirect_uri=https%3A%2F%2Fllm.rrzu.com%2Foauth%2Fwechat&response_type=code&scope=snsapi_login&state=${state}#wechat_redirect`
+      urls.push(url)
+      return Response.json({ success: true, data: { url } })
     }
     return Response.json({ success: false, message: `未预期的路径 ${u.pathname}` })
   }
 
-  return { fetchImpl, calls, bound, dead }
+  return { fetchImpl, calls, bound, dead, urls }
 }
 
 /** 造一个带两个「没绑微信」账号的配置目录。 */
@@ -174,7 +173,11 @@ test("§3 GET /bind/go 打一次实测 + 一次取授权地址，出二维码且
   assert.match(html, /data:image\/png;base64,/, "页面要有二维码图")
   assert.match(html, /待绑定账号 #1/)
   assert.match(html, /确认登录/)
-  assert.ok(html.includes("state=state-1"), "页面里的授权链接应带平台签发的 state")
+  // 授权链接现在**只**编码在二维码里（页面上不再给「点这里打开」的按钮），
+  // 所以用同一个编码器把预期 URL 编一遍，看页面里是不是那一张。
+  assert.ok(platform.urls.length === 1, "平台应只被要过一次授权地址")
+  const expectedQr = qrPng(platform.urls[0], { ecl: "L", scale: 8, border: 4 }).toString("base64")
+  assert.ok(html.includes(expectedQr), "页面里的二维码必须就是平台签发的那条授权 URL")
   assert.ok(!html.includes(PHONE_A), "出码页不能出现手机号")
 })
 
@@ -600,6 +603,24 @@ test("§22b 非法窗口值不能把节流静默关掉", async (t) => {
   await fetch(`${base}/bind/go`)
   const second = await fetch(`${base}/bind/go`).then((r) => r.text())
   assert.match(second, /操作太快了/, "NaN 窗口要回落成默认 3s，而不是 0")
+})
+
+test("§27 出码页必须明确「用微信扫一扫直接扫，相册/长按识别无效」", async (t) => {
+  const { base } = await startServer(t)
+  const go = await fetch(`${base}/bind/go`).then((r) => r.text())
+
+  assert.match(go, /必须用/, "要有强制提示")
+  assert.match(go, /扫一扫/)
+  assert.match(go, /相册/, "要明确相册无效")
+  assert.match(go, /无效/)
+  assert.match(go, /另一台手机/, "要告诉用户拿另一台手机扫")
+  // 「长按识别」只能出现在「无效」的语境里，不能作为操作指引出现
+  assert.ok(!go.includes("长按上面的二维码"), "不能教用户长按那张码去识别")
+  assert.match(go, /长按识别[^<]*无效/, "提到长按识别时必须明确是无效路径")
+
+  const land = await fetch(`${base}/bind`).then((r) => r.text())
+  assert.match(land, /扫一扫/)
+  assert.match(land, /相册/)
 })
 
 // ── ㉔ 面板里能改固定码的公网地址（不用重启 magpie）────────────────────────

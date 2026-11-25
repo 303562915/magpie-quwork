@@ -468,11 +468,23 @@ location /bind {
 本机没有公网 IP 也可以用隧道（**只把 4400 指出去**）：
 
 ```bash
-cloudflared tunnel --url http://127.0.0.1:4400     # 临时域名，每次变 → 只适合试扫
+npm run bind-tunnel                    # 起 cloudflared 快速隧道 + 自动重出固定码
+npm run bind-tunnel -- 4400 ./out      # 指定端口 / 输出目录
 ```
 
-> ⚠ 临时隧道每次重启换域名，而固定二维码的图案是**跟着域名变**的。
-> 要让二维码永久不变，必须用**你自己的域名**（命名隧道或 VPS + 证书）。
+它会自动做三件事：抓隧道域名 → 重出 `out/固定码.png` + `out/固定码.print.html` → 写 `out/当前公网地址.txt`。
+隧道断了会自动重连，域名一变码跟着变，**永远不会出现「印出去的码指向旧地址」**。
+
+> ⚠ 快速隧道每次重启都换随机域名，而固定二维码的图案是**跟着域名变**的 ——
+> 只适合试扫，不能印。要让码永久不变，必须用**你自己的域名**：
+> Cloudflare 命名隧道（`cloudflared tunnel login` → `create` → `route dns`）或自己的 VPS + 证书。
+
+### 扫码姿势（页面里已经强制提示，别删）
+
+**必须用微信「扫一扫」直接扫屏幕上那张码。** 从相册选图、长按识别、或者把二维码里那条
+`open.weixin.qq.com/connect/qrconnect` 直接在微信里打开，都**不会**跳「确认登录」——
+微信内置浏览器打不开这个授权页。所以出码页上有一块红框提示，并且**故意不给**
+「点这里打开授权页」的按钮（`src/bind-pages.mjs` 的 `goPage()`，判据见 tests §27）。
 
 ### 公网地址怎么配（**不用重启 magpie**）
 
@@ -546,7 +558,7 @@ location /bind {
 
 ```bash
 cd D:\project_GIT\magpie-plugins\magpie-quwork
-node --test            # 全绿（当前 271 条）
+node --test            # 全绿（当前 272 条）
 node -e "import('./index.mjs').then(m=>console.log(Object.keys(m)))"
 # → [ 'QuWorkAuthPlugin', '_internal' ]
 ```
@@ -574,7 +586,7 @@ src/bind-pages.mjs         门户 HTML（落地页 / 出码页 / 没号页 / 出
 src/qr.mjs                 零依赖二维码编码器（字节模式，版本 1~10，ECC L/M/Q/H）+ PNG
 scripts/bind-server.mjs    门户专用进程（只服务 /bind*，公网只暴露它）
 scripts/bind-qr.mjs        印固定码：PNG + A4 打印页
-tests/*.test.mjs           271 条
+tests/*.test.mjs           272 条
 ```
 
 ## 9. 出处

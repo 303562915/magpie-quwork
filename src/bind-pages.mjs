@@ -3,7 +3,11 @@
 // # 三条硬规则
 //
 //	① 页面上**绝不出现**手机号、平台 token、账号 key —— 打开页面的是陌生人；
-//	② 手机优先（扫码进来的一定是微信内置浏览器），二维码要大、要能长按识别；
+//	② 手机优先（扫码进来的一定是微信内置浏览器），二维码要大、要能对着屏幕直接扫；
+//
+// ⚠ 页面里**不能**教用户「长按识别 / 相册识别」：那条路会让微信在自己的内置浏览器里
+//   去开 `open.weixin.qq.com/connect/qrconnect`，实测无效。必须让**另一台设备**用微信
+//   「扫一扫」直接扫屏幕上这张码。文案见 `goPage()` 的红色提示。
 //	③ 任何分支都给一页能看懂的 HTML，不要 500 白屏（扫码的人不知道你在修东西）。
 
 /** HTML 转义（页面里所有外部字符串都必须过一遍）。 */
@@ -55,6 +59,12 @@ p { margin: 8px 0; color: #4b5563; font-size: 14px; }
   background: #eef2ff; color: #4338ca; font-size: 12px; font-weight: 600;
 }
 .big { font-size: 17px; color: #111827; font-weight: 600; }
+.alert {
+  margin: 14px 0; padding: 12px 14px; border-radius: 12px;
+  background: #fff1f2; border: 1px solid #fecdd3; color: #9f1239;
+  font-size: 15px; font-weight: 700; line-height: 1.5; text-align: center;
+}
+.alert small { display: block; margin-top: 6px; font-size: 13px; font-weight: 500; color: #b91c1c; }
 .btn {
   display: block; width: 100%; margin-top: 14px; padding: 13px 16px;
   border-radius: 12px; border: 0; background: #07c160; color: #fff;
@@ -121,6 +131,7 @@ export function landingPage(opts = {}) {
   <span class="badge">微信绑定</span>
   <h1>帮我们绑一个账号</h1>
   <p>点下面的按钮，页面会分给你一个**还没绑定微信**的账号，再用微信扫它给的码、点「确认登录」就完成了。</p>
+  <div class="alert">必须用微信「扫一扫」直接扫码<small>相册选图 / 长按识别 打开的一律无效</small></div>
   <p class="hint">每个账号只会分给一个人；分到之后 5 分钟内有效，被占用的账号会重新回到池子里。</p>
   <a class="btn" href="${esc(go)}">开始绑定</a>
   <p class="hint">当前可分配 <strong>${available}</strong> 个 · 已绑定 <strong>${bound}</strong> / 共 ${total} 个</p>
@@ -144,9 +155,12 @@ export function goPage(opts) {
   <span class="badge">待绑定账号 ${esc(opts.label)}</span>
   <h1>用微信扫这个码</h1>
   <img class="qr" id="qr" src="${esc(opts.qrDataUri)}" alt="微信扫码绑定">
+  <div class="alert">
+    必须用<b>另一台手机</b>的微信「<b>扫一扫</b>」<br>直接扫上面这张二维码
+    <small>从相册选图 / 长按识别 打开的**无效**，扫了也不会跳「确认登录」</small>
+  </div>
   <p class="big">扫完在微信里点「<span class="ok">确认登录</span>」</p>
-  <p class="hint">在微信里打开本页时，可以**长按上面的二维码 → 识别图中二维码**；也可以直接点下面的按钮。</p>
-  <a class="btn secondary" href="${esc(opts.authorizeUrl)}">在微信里直接打开授权页</a>
+  <p class="hint">如果身边只有这一台手机：请把这张码截图发给朋友，让朋友用他的微信扫。</p>
   <p class="hint">剩余时间 <span class="timer" id="left">--:--</span>，超时请重新扫码。</p>
   <p class="hint" id="poll">正在等待确认…</p>
   <a class="btn" id="done" style="display:none" href="${esc(go)}">再帮我们绑一个</a>
