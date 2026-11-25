@@ -210,7 +210,16 @@ export function createBindServer(opts = {}) {
       if (isGet && rest === "/api/check") {
         const session = String(url.searchParams.get("session") ?? "")
         if (!allow(`check|${ipOf(req)}|${session}`, checkWindowMs)) return sendJson(res, 200, { status: "pending", throttled: true })
-        return sendJson(res, 200, await portal.check(session))
+        const r = await portal.check(session)
+        // 绑成功是唯一值得单独记一行的事件（回答「有人绑定了吗」不用翻池子）
+        if (r.status === "bound" && logFile) {
+          try {
+            appendFileSync(logFile, `${new Date().toISOString()} BOUND label=${r.label ?? "?"} ip=${ipOf(req)}\n`, "utf8")
+          } catch {
+            /* 日志失败不影响结果 */
+          }
+        }
+        return sendJson(res, 200, r)
       }
 
       if (isGet && rest === "/api/pool") {

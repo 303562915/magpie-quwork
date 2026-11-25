@@ -27,19 +27,20 @@ function seed(t) {
   return dir
 }
 
-function fakeFetch() {
+function fakeFetch(boundTokens = []) {
   const calls = []
+  const bound = new Set(boundTokens)
   const fetchImpl = async (url, init) => {
     const p = new URL(String(url)).pathname
     const token = String(new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer\s+/i, "")
     calls.push({ p, token })
-    if (p === "/api/user/self") return Response.json({ success: true, data: { wechat_bound: false, quota: 0 } })
+    if (p === "/api/user/self") return Response.json({ success: true, data: { wechat_bound: bound.has(token), quota: 0 } })
     if (p === "/api/oauth/wechat/url") {
       return Response.json({ success: true, data: { url: `https://open.weixin.qq.com/connect/qrconnect?state=s-${token}` } })
     }
     return Response.json({ success: false, message: "?" })
   }
-  return { fetchImpl, calls }
+  return { fetchImpl, calls, bound }
 }
 
 async function start(t, opts = {}) {
@@ -151,6 +152,36 @@ test("B8 库模式默认不写访问日志（测试/嵌入时不该往仓库落�
 
   await fetch(`${base}/bind`)
   assert.equal(existsSync(join(process.cwd(), "bind-access.log")), false, "不该在 cwd 落日志")
+})
+
+test("B9 绑定成功要单独落一行 BOUND（回答「有人绑定了吗」不用翻池子）", async (t) => {
+  const logFile = join(tempDir(t), "access.log")
+  const platform = fakeFetch()
+  const server = createBindServer({
+    configDir: seed(t),
+    platformBaseUrl: PLATFORM,
+    fetchImpl: platform.fetchImpl,
+    logFile,
+    allocateWindowMs: 0,
+    checkWindowMs: 0,
+    log: { warn() {} },
+  })
+  await new Promise((done) => server.listen(0, "127.0.0.1", done))
+  const base = `http://127.0.0.1:${server.address().port}`
+  t.after(() => new Promise((done) => server.close(() => done())))
+
+  const html = await fetch(`${base}/bind/go`).then((r) => r.text())
+  const session = (html.match(/var sid = "([^"]+)"/) ?? [])[1]
+  assert.equal((await fetch(`${base}/bind/api/check?session=${session}`).then((r) => r.json())).status, "pending")
+
+  // 扫码的人在微信里点了「确认登录」→ 平台侧变成已绑
+  platform.bound.add("tok-a")
+  const bound = await fetch(`${base}/bind/api/check?session=${session}`).then((r) => r.json())
+  assert.equal(bound.status, "bound")
+
+  await new Promise((done) => setTimeout(done, 100))
+  const text = readFileSync(logFile, "utf8")
+  assert.match(text, /BOUND label=#1 ip=127\.0\.0\.1/, `日志里应有 BOUND 行：${text}`)
 })
 
 test("B6 会话过期后 check 返回 expired（不是一直 pending）", async (t) => {
