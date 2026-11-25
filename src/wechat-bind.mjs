@@ -41,7 +41,7 @@ import { qrPng } from "./qr.mjs"
 export const BIND_POOL_FILE = "quwork-bind-pool.json"
 
 /** 一次扫码会话的有效期（= 占位锁的持有时间）。 */
-export const SESSION_TTL_MS = 3 * 60 * 1000
+export const SESSION_TTL_MS = 5 * 60 * 1000
 
 /** 账号池快照多久算旧（超过就在「没有可用账号」时才去重读一次上游）。 */
 export const POOL_TTL_MS = 5 * 60 * 1000

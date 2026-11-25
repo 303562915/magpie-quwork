@@ -202,7 +202,7 @@ export function landingPage(opts = {}) {
   <h1>帮我们绑一个账号</h1>
   <p>点下面的按钮，页面会分给你一个<strong>还没绑定微信</strong>的账号，再用微信扫它给的码、点「确认登录」就完成了。</p>
   <div class="alert">必须用微信「扫一扫」直接扫码<small>相册选图 / 长按识别 打开的一律无效</small></div>
-  <p class="hint">每个账号只会分给一个人；分到之后 3 分钟内有效，过期会自动换新码；没人扫的账号会自动回到池子里。</p>
+  <p class="hint">每个账号只会分给一个人；分到之后 5 分钟内有效，过期会自动换新码；没人扫的账号会自动回到池子里。</p>
   <a class="btn" href="${esc(go)}">开始绑定</a>
   <a class="btn secondary" href="${esc(wall)}">看全部待绑定账号（群里发这个也行）</a>
   <p class="hint">当前可分配 <strong>${available}</strong> 个 · 已绑定 <strong>${bound}</strong> / 共 ${total} 个</p>
@@ -236,8 +236,9 @@ export function wallPage(opts = {}) {
 <div class="card">
   <span class="badge">暂时没有空位</span>
   <h1>现在没有可绑定的账号</h1>
-  <p>所有账号要么已经绑好了，要么正被其他人扫着。请过几分钟刷新本页。</p>
+  <p>所有账号要么已经绑好了，要么正被其他人扫着（占位 5 分钟）。请过几分钟刷新本页。</p>
   <a class="btn" href="${esc(wall)}">刷新</a>
+  <p class="hint">如果你就是管理员、想立刻把被占住的号放回来：在面板「扫码绑定 → 释放所有占位」点一下，或在本机执行 <code>POST ${esc(pathOf(mount, "/bind/api/release"))}</code>。</p>
 </div>`
     return layout({ title: "暂时没有空位", body })
   }
@@ -261,7 +262,7 @@ export function wallPage(opts = {}) {
   <span class="badge">共 ${cards.length} 个待绑定账号</span>
   <h1>随便挑一个扫，帮我们绑一个号</h1>
   <div class="alert">必须用微信「扫一扫」直接扫下面任意一张<small>相册选图 / 长按识别 无效；扫完在微信里点「确认登录」</small></div>
-  <p class="hint">每张码有效期 3 分钟，过期会自己换新码，不用管；扫成功的那一格会变「已绑定」，别的格子照常可用。</p>
+  <p class="hint">每张码有效期 5 分钟，过期会自己换新码；扫成功的那一格会变「已绑定」，别的格子照常可用。</p>
   <div class="grid">${grid}</div>
   <p class="hint"><a href="${esc(wall)}">刷新本页</a> · <a href="${esc(go)}">只给我一个号</a></p>
   ${opts.remainNote ? `<p class="hint">${esc(opts.remainNote)}</p>` : ""}

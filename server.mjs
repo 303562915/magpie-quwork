@@ -316,7 +316,7 @@ export function createPageServer(opts = {}) {
    *
    * # 为什么需要它
    *
-   * 一次分配 = 2 次上游 + 占住一个号 3 分钟。没有节流时，一个脚本连点几下就能把
+   * 一次分配 = 2 次上游 + 占住一个号 5 分钟。没有节流时，一个脚本连点几下就能把
    * 整个池子的号全占住，别人再扫就只剩「暂时没有可绑定的账号」。
    * 窗口只是防呆，不是安全边界；`allocateWindowMs = 0` 可关掉（测试用）。
    */
@@ -1045,7 +1045,7 @@ export function createPageServer(opts = {}) {
         }
 
         if (isGet && rest === "/go") {
-          // 同一个 IP 3 秒内只发一次码：一次分配 = 2 次上游 + 占一个号 3 分钟，
+          // 同一个 IP 3 秒内只发一次码：一次分配 = 2 次上游 + 占一个号 5 分钟，
           // 被脚本狂刷会把整个池子锁死。
           if (!allowAllocate(clientIp(req))) {
             return sendHtml(res, errorPage("操作太快了，请等几秒再扫一次", { mount }), { head: isHead, pna, status: 200 })
