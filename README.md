@@ -378,11 +378,116 @@ curl -s http://127.0.0.1:4392/任意路径 | head -c 60   # SPA 兜底：回面�
 >
 > ⚠ 绑定自己的邀请码会回 `不能使用自己的邀请码` —— 这是**正常回执**，面板原样显示。
 
+## 7.8 扫码绑定门户（**一个固定码，群发帮绑**）
+
+7.7 那一套是「给自己一个号绑微信」：要粘回调地址，一次只能绑一个。
+这一节是运营版：**对外只发一个二维码，图案永不变**，谁扫谁帮绑一个号。
+
+```
+别人扫固定码
+  → 打开 <你的域名>/bind/go
+  → 服务端从账号池里挑一个 wechat_bound=false 的号（占位锁 5 分钟）
+  → 喂它 GET /api/oauth/wechat/url（Bearer = 该号的平台 token）拿到**平台签发的 state**
+  → 把那条授权 URL 渲染成二维码显示出来
+  → 对方再扫一次、在微信里点「确认登录」
+  → 平台按 state 找回账号，**自己完成绑定**（我们不参与）
+  → 页面轮询 /api/user/self 看到 wechat_bound=true → 显示「绑定成功 ✓」，该号标记已绑
+```
+
+### 关键机制：绑哪个号由 **state** 决定
+
+`qrconnect` 的五个参数里前四个是常量，唯一变量是 `state`：
+
+| 做法 | 结果 |
+|---|---|
+| `GET /api/oauth/wechat/url` + `Bearer <该号 token>` 拿 state | ✅ 绑到**那个号**（本节用法） |
+| 自己 `randomBytes(16)` 造 state（`src/wechat.mjs` 的 `newState()`） | ❌ 只能配合 7.7 的「粘 code 回来自己绑」，绑不到指定号 |
+
+`/api/oauth/wechat/bind?code=` 已 404（网页设置页里的按钮调的就是它），别用。
+
+### 门户路由（挂在面板服务上，默认 4392）
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/bind` | 无 | 说明页（只读快照，**零上游**） |
+| GET | `/bind/go` | 无 | 分配 + 出码（打上游 2 次：`/api/user/self` 实测 + `/api/oauth/wechat/url`；同一 IP 3 秒一次） |
+| GET | `/bind/qr.png` | 无 | **固定二维码**（内容 = `<公网地址>/bind/go`，字节恒定、`no-store`） |
+| GET | `/bind/api/check?session=` | 无 | 轮询状态 `pending` / `bound` / `expired`（打上游：`/api/user/self`；每会话 1 秒一次）；返回体只有 `status`/`label` |
+| GET | `/bind/api/pool` | 有 | 池子概览（只读快照；**不含手机号 / token**） |
+| POST | `/bind/api/sync` | 有 | 重读全池（每个号一次 `/api/user/self`） |
+
+路由按**后缀**匹配，所以带前缀的代理路径（`/_magpie/plugin/<hash>/_magpie/service/bind/go`）也能用；
+页面里的链接与轮询都用绝对路径（`/bind` 的基准目录是 `/`，相对链接会掉回面板 HTML）。
+
+### 管理接口的鉴权规则（顺序即优先级）
+
+1. 配了 `QUWORK_BIND_ADMIN_TOKEN` → **必须**带 `Authorization: Bearer <token>`；
+2. 没配 → 只允许「真的在本机直连」：回环 `remoteAddress` **且** 回环 `Host` **且** 没有任何转发类头
+   （`x-forwarded-*` 全系、`x-real-ip`、`forwarded`、`via`、`cf-connecting-ip`、`x-client-ip`、`true-client-ip`）。
+
+> ⚠ 为什么三个都要看：反代形态（`proxy_pass http://127.0.0.1:4392`）下**外网请求的 `remoteAddress` 也是 127.0.0.1**，
+> 而反代通常还会把原始 `Host` 透传进来。只看其中一个都会把 `pool`/`sync` 变成对全网开放，
+> 而 `sync` 会拿你的 token 挨个打平台（可被当成放大攻击）。
+>
+> ⚠ 管理接口的 CORS **另发**（`adminCorsHeaders`）：只对「无 Origin / `Origin: null`（file: 面板）/
+> 回环 Origin」回 `Access-Control-Allow-Origin`。整站那个通配 `*` 不能用到这两个接口上 ——
+> 否则任意公网网页都能在你本机浏览器里读走池子、把 `sync` 打满。
+>
+> 后果：**配了 token 又走反代时，面板里的「扫码绑定」tab 读不到池子**（它不会带 token）。
+> 看池子请直连本机端口，或临时清掉 `QUWORK_BIND_ADMIN_TOKEN`。
+
+### 两个环境变量
+
+```bash
+# 印在固定码里的公网地址（不设就用请求头拼，反代后容易拼出内网地址）
+QUWORK_BIND_PUBLIC_URL=https://bind.example.com
+
+# 管理接口 token（不设 = 只允许 127.0.0.1 访问 /bind/api/pool 与 /bind/api/sync）
+QUWORK_BIND_ADMIN_TOKEN=<随机串>
+```
+
+Nginx 反代最小配置（微信内置浏览器对 http 会提示「非官方网页」，**必须 HTTPS**）：
+
+```nginx
+location /bind {
+    proxy_pass http://127.0.0.1:4392;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+}
+```
+
+### 面板里的「扫码绑定」tab
+
+只看池子：每个号一行（编号 / 已绑还是可分配 / 积分 / 检查时间），带一个固定码预览和「刷新全部账号状态」。
+**对外页面（`/bind/*`）只显示编号 `#3`，不显示手机号、账号 key、token** —— 打开它的是陌生人。
+
+### 落盘与不落盘
+
+| 东西 | 位置 | 说明 |
+|---|---|---|
+| 账号池快照 | `<configDir>/quwork-bind-pool.json` | `{ updatedAt, accounts: { [key]: { wechatBound, quota, checkedAt } } }` |
+| 扫码会话 + 占位锁 | **只在内存** | 重启即失效；扫码的人重新扫一次即可，不需要持久化 |
+
+### 已知未验证项
+
+1. **`state` 的有效期 / 是否一次性**：没实测。实现按「一次性 + 5 分钟」做（最安全的那一侧）。
+2. **一个微信号能否绑多个 QuWork 号**：没验证。若不能，运营方案要改成「一人帮绑一个」。
+3. 平台是否对 `/api/user/self` 限流：`/bind/api/check` 每 3 秒一次，多人同时扫会叠加，必要时把轮询间隔调大。
+
+### 实现侧三条「别踩」
+
+| 症状 | 原因 | 出处 |
+|---|---|---|
+| 扫进来立刻显示「绑定成功」，对方什么都没做 | 只信快照就把「早就绑过」的号发出去了。出码前**必须**实测一次 `/api/user/self`；读不到（超时/401）就换下一个号，不要硬发 | `src/wechat-bind.mjs` `allocate()` |
+| 两个人同时扫拿到同一个号 | 「挑号 → 取授权地址」之间隔着两次 await；预留表必须从挑中就一直持有（覆盖 2×上游超时），并固定住这一轮的 key | 同上（`reserved` / `RESERVE_MS`） |
+| 平台回 `1` 或 `"true"` 时把已绑号发出去 | `wechat_bound` 是本功能唯一判据，真假判定走 `isTruthyFlag()`（`true`/`1`/`"true"`/`"1"` 都算真） | `src/wechat-bind.mjs` `isTruthyFlag()` |
+
 ## 8. 开发
 
 ```bash
 cd D:\project_GIT\magpie-plugins\magpie-quwork
-node --test            # 全绿（当前 175 条）
+node --test            # 全绿（当前 259 条）
 node -e "import('./index.mjs').then(m=>console.log(Object.keys(m)))"
 # → [ 'QuWorkAuthPlugin', '_internal' ]
 ```
@@ -405,7 +510,10 @@ src/hooks/loader.mjs       请求代理（改 URL、换鉴权、补头、按 bod
 src/hooks/models.mjs       live 目录 → 失败回落
 src/hooks/usage.mjs        积分 / 说明窗（带账号名）
 src/refresh.mjs            续期（2h 兜底 / <1h 触发 / 60s 节流）
-tests/*.test.mjs           86 条
+src/wechat-bind.mjs        绑定门户：账号池快照 / 占位锁 / 会话 / 平台签发 state
+src/bind-pages.mjs         门户 HTML（落地页 / 出码页 / 没号页 / 出错页，手机优先）
+src/qr.mjs                 零依赖二维码编码器（字节模式，版本 1~10，ECC L/M/Q/H）+ PNG
+tests/*.test.mjs           259 条
 ```
 
 ## 9. 出处

@@ -149,7 +149,7 @@ function on(btn, fn) {
 }
 
 // ── tab ────────────────────────────────────────────────────────────────
-const TABS = ["account", "invite", "benefit", "settings"]
+const TABS = ["account", "invite", "benefit", "settings", "bind"]
 function activateTab(name) {
   for (const t of TABS) {
     const tab = $(`tab-${t}`)
@@ -162,6 +162,8 @@ function activateTab(name) {
     if (isOn) pane.removeAttribute("hidden")
     else pane.setAttribute("hidden", "")
   }
+  // 绑定门户的池子状态只在切到那个 tab 时读（只读本地快照，不打上游）
+  if (name === "bind") void loadBindPool()
 }
 for (const t of TABS) $(`tab-${t}`)?.addEventListener("click", () => activateTab(t))
 
@@ -848,6 +850,67 @@ async function saveSettings() {
 for (const id of ["setting-port", "setting-auto", "setting-acc-conc", "setting-pages"]) {
   $(id)?.addEventListener("change", () => saveSettings().catch((e) => toast(String(e?.message ?? e), true)))
 }
+
+// ── ⑤ 扫码绑定门户 ─────────────────────────────────────────────────────
+//
+// 这个 tab 只是「看池子 + 拿固定码」：
+//   固定码 URL = `<面板服务根>/bind/qr.png`，内容是 `<公网地址>/bind/go`，图案永不变。
+//   真正扫码的人走的是 `/bind/go`（对陌生人开放，页面里只有编号，没有手机号）。
+function bindStateCell(a) {
+  if (a.tokenInvalid) return { text: "token 失效", cls: "fail" }
+  if (a.wechatBound) return { text: "已绑微信", cls: "done" }
+  return { text: "未绑（可分配）", cls: "warn" }
+}
+
+function renderBind(data) {
+  const accounts = Array.isArray(data?.accounts) ? data.accounts : []
+  $("bind-summary").textContent =
+    `共 ${data?.total ?? accounts.length} · 已绑 ${data?.bound ?? 0} · 可分配 ${data?.available ?? 0}` +
+    (data?.broken ? ` · 失效 ${data.broken}` : "")
+  $("bind-note").textContent = data?.updatedAt ? `快照：${fmtAgo(data.updatedAt)}` : "还没有快照，点「刷新全部账号状态」"
+
+  $("bind-body").innerHTML = accounts.length
+    ? accounts
+        .map((a) => {
+          const st = bindStateCell(a)
+          return `<tr>
+            <td>${esc(a.label ?? a.key)}</td>
+            <td><span class="pill ${st.cls}">${esc(st.text)}</span></td>
+            <td>${fmtNum(a.quota)}</td>
+            <td>${a.checkedAt ? fmtAgo(a.checkedAt) : "—"}</td>
+            <td class="muted">${esc(a.error ?? "")}</td>
+          </tr>`
+        })
+        .join("")
+    : `<tr><td colspan="5"><div class="empty">没有 quwork 账号（先在账号页添加）</div></td></tr>`
+}
+
+async function loadBindPool() {
+  try {
+    renderBind(await api("/bind/api/pool"))
+  } catch (e) {
+    $("bind-body").innerHTML = `<tr><td colspan="5"><div class="empty bad">读取失败：${esc(String(e?.message ?? e))}</div></td></tr>`
+  }
+}
+
+on($("bind-refresh"), loadBindPool)
+
+on($("bind-sync"), async () => {
+  $("bind-note").textContent = "正在逐个读取账号状态…"
+  const d = await api("/bind/api/sync", {})
+  renderBind(d.overview ?? d)
+  toast(`已更新 ${d.updated} 个，失败 ${d.failed} 个`, d.failed > 0)
+  void loadAccounts()
+})
+
+;(function initBindStatic() {
+  const qr = $("bind-qr")
+  if (qr) qr.src = `${BASE}/bind/qr.png`
+  const open = $("bind-open")
+  if (open) open.href = `${BASE}/bind`
+  const target = $("bind-target")
+  if (target) target.textContent = `${BASE}/bind/go`
+})()
 
 // ── 顶栏 ───────────────────────────────────────────────────────────────
 on($("refresh-all"), async () => {

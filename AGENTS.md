@@ -55,6 +55,9 @@
 | `src/cache.mjs` | 磁盘缓存的**唯一**读写入口（`quwork-models-cache.json` / `quwork-usage-cache.json`） |
 | `src/importer.mjs` / `src/paste-import.mjs` | `auth.import`（供应商页的「从文件导入」）/ 登录弹窗里的「粘贴导入」 |
 | `page/` | `gateway.html`（沙盒入口，必须加载 `_magpie/bridge.js`）+ `index.html`/`assets/`（真页面） |
+| `src/wechat-bind.mjs` | 微信**扫码绑定门户**：账号池快照 / 占位锁 / 会话 / 平台签发 state（`/api/oauth/wechat/url`） |
+| `src/bind-pages.mjs` | 门户 HTML（落地页 / 出码页 / 没号页 / 出错页）——只显示编号，不显示手机号 |
+| `src/qr.mjs` | 零依赖二维码编码器 + PNG（字节模式，版本 1~10，ECC L/M/Q/H） |
 | `tests/` | `node --test`，纯本地、无真实网络 |
 
 ## 二、改哪块该读什么
@@ -66,6 +69,7 @@
 | 额度 / 签到 | `src/hooks/usage.mjs`、`src/invite.mjs` | `tests/usage.test.mjs`、`tests/t32-checkin-options.test.mjs` 绿 |
 | 模型目录 / 缓存 | `src/hooks/models.mjs`、`src/cache.mjs` | `tests/models*.test.mjs`、`tests/t39-cache.test.mjs` 绿 |
 | 面板 | `server.mjs`、`page/` | `tests/page.test.mjs` 绿 + 打开面板时零上游请求 |
+| 扫码绑定门户 | `src/wechat-bind.mjs`、`src/bind-pages.mjs`、`src/qr.mjs`、`server.mjs` 的 `/bind*` 段 | `tests/wechat-bind.test.mjs` 绿 + 打开 `/bind` 零上游 |
 | 导入 | `src/importer.mjs`、`src/paste-import.mjs` | `tests/importer.test.mjs`、`tests/paste-import.test.mjs` 绿 |
 
 ## 三、会静默出错的坑（症状 → 判据 → 出处）
@@ -87,6 +91,14 @@
 | 13 | 一次粘多条只存进去 1 个 | 宿主一次登录只保存一个账号；第 2..N 条必须自己走 `client.auth.set` | `src/paste-import.mjs:24-31`、`index.mjs:641-643` |
 | 14 | quwork 的积分明明有，卡片却说要补平台 token | 两个 token 用途**严格分离**：`llmToken` 调模型、`token` 读积分；`token` 可能是落盘的 `token` 或 magpie 存的 `refresh`，两个都要认 | `src/hooks/usage.mjs:5-13`、`:189-191`、`:206-216` |
 | 15 | 平台接口偶尔被判风控 | 平台接口**不带** `X-QurWork-*`（带了会被当成桌面客户端走另一条风控）；那两个头只给模型平面 | `src/hooks/loader.mjs:20-29`、`src/hooks/usage.mjs:219-222` |
+| 16 | 门户里扫进来就显示「绑定成功」，对方什么都没做 | 出码前必须实测 `/api/user/self`；只看快照会把「早就绑过」的号发出去（真机复现：快照为空时 43 个号全被当可分配） | `src/wechat-bind.mjs` 的 `allocate()` |
+| 17 | 门户绑到了**别的**账号 | 授权地址的 `state` 必须来自 `GET /api/oauth/wechat/url`（Bearer = 该号 token）；自己 `newState()` 造出来的只适合「粘 code 回来自己绑」 | `src/wechat-bind.mjs` 的 `fetchAuthorizeUrl()`、`src/wechat.mjs` 头部注释 |
+| 18 | 印出来的固定码扫了打不开 | `/bind/qr.png` 里的地址取「`publicBaseUrl` → `x-forwarded-*` → Host」；反代后没配 `QUWORK_BIND_PUBLIC_URL` 会拼成内网地址 | `server.mjs` 的 `requestOrigin()` |
+| 19 | 反代一切就绪后 `/bind/api/pool`、`/bind/api/sync` 对全网开放 | 反代后 `remoteAddress` 也是 127.0.0.1，所以「本机」判定必须**排除带 `x-forwarded-*` 的请求**；否则 `sync` 成了拿你 token 打平台的放大入口 | `src/wechat-bind.mjs` `authorize()`、`tests/wechat-bind.test.mjs §18` |
+| 20 | 一个脚本连点几下，别人再扫就全是「暂时没有可绑定账号」 | `/bind/go` 一次占一个号 5 分钟，必须按 IP 节流（默认 3 秒；`allocateWindowMs: 0` 关掉，仅供测试） | `server.mjs` 的 `allowAllocate()`、`tests/wechat-bind.test.mjs §22` |
+| 21 | 门户页面上的按钮跳到面板首页，或轮询 404 | 页面里的链接一律**绝对路径**（`<mount>/bind/go`）；`/bind` 的基准目录是 `/`，相对 `href="go"` 会变成 `/go` | `src/bind-pages.mjs` 的 `pathOf()`、`tests/wechat-bind.test.mjs §21` |
+| 22 | 随便打开一条公网网页，你的账号池就被读走 / sync 被打满 | 整站是 `ACAO: *`（file: 面板必须），管理接口必须**另发** CORS（只认 null / 回环 Origin）；只靠回环 IP 判「本机」在反代下没用 | `server.mjs` 的 `adminCorsHeaders()`、`src/wechat-bind.mjs` `authorize()`、`tests §23` |
+| 23 | 持一个 session 就能无限打 `/api/user/self` | `/bind/api/check` 按「IP+session」1 秒一次节流（`checkWindowMs`；被挡时回 `{status:"pending",throttled:true}`，不改页面文案） | `server.mjs` 的 `allowCheck()` |
 
 ## 四、测试入口
 

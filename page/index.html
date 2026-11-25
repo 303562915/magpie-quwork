@@ -39,6 +39,7 @@
       <button id="tab-invite" class="tab" data-tab="invite" role="tab" aria-controls="pane-invite" aria-selected="false" tabindex="-1">邀请</button>
       <button id="tab-benefit" class="tab" data-tab="benefit" role="tab" aria-controls="pane-benefit" aria-selected="false" tabindex="-1">权益</button>
       <button id="tab-settings" class="tab" data-tab="settings" role="tab" aria-controls="pane-settings" aria-selected="false" tabindex="-1">设置</button>
+      <button id="tab-bind" class="tab" data-tab="bind" role="tab" aria-controls="pane-bind" aria-selected="false" tabindex="-1">扫码绑定</button>
     </nav>
 
     <!-- ① 账号：表格管理 -->
@@ -270,6 +271,48 @@
         <div class="kv">
           <dt>模型平面</dt><dd class="mono" id="upstream-model">—</dd>
           <dt>平台 API</dt><dd class="mono" id="upstream-platform">—</dd>
+        </div>
+      </div>
+    </section>
+
+    <!-- ⑤ 扫码绑定门户：一个固定码 → 分一个未绑定账号 → 出该账号的授权码 -->
+    <section class="pane" id="pane-bind" role="tabpanel" aria-labelledby="tab-bind" hidden>
+      <div class="card">
+        <div class="section-heading">
+          <div><h2>扫码绑定门户</h2><p>把同一个固定二维码发给 N 个人：每人扫一次就帮你绑一个未绑微信的账号。</p></div>
+          <span class="section-tag">WECHAT BIND</span>
+        </div>
+
+        <div class="toolbar">
+          <div class="toolbar-actions">
+            <button id="bind-refresh">读取池子状态</button>
+            <button id="bind-sync" class="primary">刷新全部账号状态</button>
+            <a id="bind-open" class="muted" href="#" target="_blank" rel="noreferrer">打开门户页</a>
+          </div>
+          <div class="toolbar-actions">
+            <span id="bind-summary" class="muted" role="status">—</span>
+            <span id="bind-note" class="muted" role="status"></span>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table id="bind-table">
+            <thead>
+              <tr><th>账号</th><th>微信</th><th>平台积分</th><th>检查时间</th><th>说明</th></tr>
+            </thead>
+            <tbody id="bind-body">
+              <tr><td colspan="5"><div class="empty">加载中…</div></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="toolbar" style="margin-top:14px">
+          <img id="bind-qr" alt="固定二维码" width="180" height="180" style="border-radius:10px;background:#fff">
+          <div>
+            <p class="hint">这张二维码指向 <code id="bind-target">/bind/go</code>，<strong>图案永远不变</strong>：可以印出来、群发、发给任意多人。每人扫它，网页自动挑一个还没绑微信的账号，显示该账号专属的授权码，对方扫码并点「确认登录」后平台自己完成绑定。</p>
+            <p class="hint">账号池来自本机 <code>plugin-auth.json</code> 里的 quwork 条目；这个页面只显示编号，不显示手机号和 token。</p>
+            <p class="hint">下面这张码里的地址取<strong>面板服务地址</strong>。要印成公网二维码，先设环境变量 <code>QUWORK_BIND_PUBLIC_URL=https://你的域名</code>（并把 <code>/bind</code> 反代出去），再点一次「读取池子状态」刷新图片。</p>
+          </div>
         </div>
       </div>
     </section>

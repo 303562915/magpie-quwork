@@ -33,6 +33,9 @@ import { readAll } from "./src/auth-store.mjs"
 import { rememberUsage, windowsFromSelf } from "./src/hooks/usage.mjs"
 import { refreshCatalogCache } from "./src/hooks/models.mjs"
 import { buildAuthorizeUrl, bindWechat, exchangeCode, newState, parseCallback } from "./src/wechat.mjs"
+import { createBindPortal } from "./src/wechat-bind.mjs"
+import { errorPage, goPage, landingPage, noAccountPage } from "./src/bind-pages.mjs"
+import { qrPng } from "./src/qr.mjs"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PAGE_DIR = join(HERE, "page")
@@ -274,7 +277,8 @@ export function effectiveSettings(configDir, options = {}) {
  * （原来的启动内联在里面，测试只能真起一个服务才能看设置）。
  *
  * @param {{configDir?: string, platformBaseUrl?: string, log?: any, fetchImpl?: typeof fetch,
- *   credential?: any, now?: () => number, autoRefresh?: boolean}} [opts]
+ *   credential?: any, now?: () => number, autoRefresh?: boolean, publicBaseUrl?: string,
+ *   bindAdminToken?: string, allocateWindowMs?: number, checkWindowMs?: number}} [opts]
  */
 export function createPageServer(opts = {}) {
   const configDir = String(opts.configDir ?? "").trim()
@@ -282,6 +286,64 @@ export function createPageServer(opts = {}) {
   const log = opts.log ?? console
   const fetchImpl = opts.fetchImpl
   const now = typeof opts.now === "function" ? opts.now : () => Date.now()
+
+  // ── 微信绑定门户 ──
+  //
+  // 固定二维码指向 `<公网地址>/bind/go`；图案恒定，可以印出来群发。
+  // 公网地址三级来源：显式 options.publicBaseUrl → `$QUWORK_BIND_PUBLIC_URL` → 请求头。
+  // 管理接口鉴权：配了 `$QUWORK_BIND_ADMIN_TOKEN` 就比 Bearer，没配只允许本机。
+  const bindPublicBaseUrl = String(opts.publicBaseUrl ?? globalThis.process?.env?.QUWORK_BIND_PUBLIC_URL ?? "")
+    .trim()
+    .replace(/\/+$/, "")
+  const bindPortal = createBindPortal({
+    configDir,
+    platformBaseUrl,
+    fetchImpl,
+    now,
+    adminToken: String(opts.bindAdminToken ?? globalThis.process?.env?.QUWORK_BIND_ADMIN_TOKEN ?? "").trim(),
+  })
+
+  /**
+   * `/bind/go` 的按 IP 节流。
+   *
+   * # 为什么需要它
+   *
+   * 一次分配 = 2 次上游 + 占住一个号 5 分钟。没有节流时，一个脚本连点几下就能把
+   * 整个池子的号全占住，别人再扫就只剩「暂时没有可绑定的账号」。
+   * 窗口只是防呆，不是安全边界；`allocateWindowMs = 0` 可关掉（测试用）。
+   */
+  const rawWindow = Number(opts.allocateWindowMs ?? 3000)
+  // 传了非法值（"3s" 之类）时**回落到默认**，别静悄悄把节流关掉
+  const allocateWindowMs = Number.isFinite(rawWindow) ? Math.max(0, rawWindow) : 3000
+  const allocateHits = new Map()
+  /** `/bind/api/check` 的节流（每会话 1 秒一次；页面本身 3 秒一轮）。 */
+  const rawCheck = Number(opts.checkWindowMs ?? 1000)
+  const checkWindowMs = Number.isFinite(rawCheck) ? Math.max(0, rawCheck) : 1000
+  const checkHits = new Map()
+  const allowCheck = (ip, session) => {
+    if (!(checkWindowMs > 0)) return true
+    const key = `${String(ip || "")}|${String(session || "")}`
+    const t = now()
+    const last = Number(checkHits.get(key) ?? 0)
+    if (t - last < checkWindowMs) return false
+    checkHits.set(key, t)
+    if (checkHits.size > 5000) {
+      for (const [k, v] of [...checkHits.entries()].sort((a, b) => a[1] - b[1]).slice(0, 1000)) checkHits.delete(k)
+    }
+    return true
+  }
+  const allowAllocate = (ip) => {
+    if (!(allocateWindowMs > 0)) return true
+    const key = String(ip || "")
+    const t = now()
+    const last = Number(allocateHits.get(key) ?? 0)
+    if (t - last < allocateWindowMs) return false
+    allocateHits.set(key, t)
+    if (allocateHits.size > 5000) {
+      for (const [k, v] of [...allocateHits.entries()].sort((a, b) => a[1] - b[1]).slice(0, 1000)) allocateHits.delete(k)
+    }
+    return true
+  }
 
   /** 当前凭据（每次请求现读，用户在别处重新登录后不必重启面板）。 */
   const cred = () => resolveCredential(configDir, opts.credential)
@@ -874,9 +936,131 @@ export function createPageServer(opts = {}) {
 
     try {
       // ── CORS 预检：直接 204，不碰任何业务逻辑 ──
+      //
+      // ⚠ 管理接口（`/bind/api/pool|sync`）**不能**回通配 CORS，否则任意公网页面
+      //   都能在本机浏览器里读走账号清单、把 sync 打满。见 `adminCorsHeaders`。
       if (req.method === "OPTIONS") {
-        res.writeHead(204, { ...corsHeaders(pna), "cache-control": "no-store" })
+        const adminPath = /\/bind\/api\/(pool|sync)$/.test(path)
+        res.writeHead(204, {
+          ...(adminPath
+            ? { ...adminCorsHeaders(req), "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, Authorization" }
+            : corsHeaders(pna)),
+          "cache-control": "no-store",
+        })
         return res.end()
+      }
+
+      // ── 微信绑定门户：固定码 → 分配未绑定账号 → 出该账号的授权码 ──
+      //
+      //	GET  /bind            说明页（只读快照，**零上游**）
+      //	GET  /bind/go         分配 + 展示该账号专属二维码（打上游：/api/oauth/wechat/url）
+      //	GET  /bind/qr.png     固定二维码（内容 = <公网地址>/bind/go，图案恒定）
+      //	GET  /bind/api/check  轮询绑定状态（打上游：/api/user/self）
+      //	GET  /bind/api/pool   池子概览（鉴权；只读快照）
+      //	POST /bind/api/sync   重读全池（鉴权；打上游）
+      //
+      // 这几个路径对陌生人开放，所以页面里只有编号（#3），没有手机号 / token / key。
+      //
+      // ⚠ 路径按**后缀**匹配：magpie 可能用带前缀的代理路径打开面板
+      //   （`/_magpie/plugin/<hash>/_magpie/service/bind/go`），写死 `/bind/go` 会全部落到
+      //   SPA 兜底返回面板 HTML。匹配出来的前缀再回填进页面里的绝对链接。
+      const bind = /^(.*)\/bind(\/.*)?$/.exec(path)
+      if (bind) {
+        const mount = bind[1]
+        const rest = (bind[2] ?? "").replace(/\/+$/, "") // "" | "/go" | "/qr.png" | "/api/check" …
+
+        if (isGet && (rest === "" || rest === "/index.html")) {
+          const ov = bindPortal.overview()
+          return sendHtml(
+            res,
+            landingPage({ total: ov.total, available: ov.available, bound: ov.bound, mount }),
+            { head: isHead, pna, status: 200 },
+          )
+        }
+
+        if (isGet && rest === "/go") {
+          // 同一个 IP 3 秒内只发一次码：一次分配 = 2 次上游 + 占一个号 5 分钟，
+          // 被脚本狂刷会把整个池子锁死。
+          if (!allowAllocate(clientIp(req))) {
+            return sendHtml(res, errorPage("操作太快了，请等几秒再扫一次", { mount }), { head: isHead, pna, status: 200 })
+          }
+          const r = await bindPortal.allocate()
+          if (!r.ok) {
+            const html =
+              r.reason === "no-account" ? noAccountPage({ mount }) : errorPage(String(r.message ?? ""), { mount })
+            return sendHtml(res, html, { head: isHead, pna, status: 200 })
+          }
+          let qrDataUri = ""
+          try {
+            // ECC L：授权地址约 200 字节，10 版 L 级到 271 字节，留足余量
+            qrDataUri = `data:image/png;base64,${qrPng(r.authorizeUrl, { ecl: "L", scale: 8, border: 4 }).toString("base64")}`
+          } catch (e) {
+            log?.warn?.(`quwork bind: 二维码生成失败: ${String(e?.message ?? e).slice(0, 120)}`)
+            return sendHtml(res, errorPage("二维码生成失败", { mount }), { head: isHead, pna, status: 200 })
+          }
+          return sendHtml(
+            res,
+            goPage({
+              sessionId: r.sessionId,
+              label: r.label,
+              qrDataUri,
+              authorizeUrl: r.authorizeUrl,
+              ttlMs: r.ttlMs,
+              mount,
+            }),
+            { head: isHead, pna, status: 200 },
+          )
+        }
+
+        if (isGet && rest === "/qr.png") {
+          // 固定二维码：内容就是「本服务公网地址 + /bind/go」，与图案一一对应、永不变化
+          const target = `${requestOrigin(req, bindPublicBaseUrl)}${mount}/bind/go`
+          let buf
+          try {
+            buf = qrPng(target, { ecl: "L", scale: 8, border: 4 })
+          } catch (e) {
+            // 这是一张 <img>：出错也得给一张图，否则页面上只看到裂图、看不到原因
+            log?.warn?.(`quwork bind: 固定码生成失败: ${String(e?.message ?? e).slice(0, 120)}`)
+            buf = PLACEHOLDER_PNG
+          }
+          res.writeHead(200, {
+            ...corsHeaders(pna),
+            "content-type": "image/png",
+            // no-store：运维改了 QUWORK_BIND_PUBLIC_URL 就要立刻能拿到新图
+            "cache-control": "no-store",
+            "content-length": String(buf.length),
+            "x-qr-target": target,
+          })
+          return res.end(isHead ? undefined : buf)
+        }
+
+        if (isGet && rest === "/api/check") {
+          const session = String(url.searchParams.get("session") ?? "")
+          if (!allowCheck(clientIp(req), session)) {
+            // 不报错、不改页面文案：只是这一次不真的去打上游
+            return json(200, { status: "pending", throttled: true })
+          }
+          return json(200, await bindPortal.check(session))
+        }
+
+        if (isGet && rest === "/api/pool") {
+          if (!bindPortal.authorize(req)) return sendAdminJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" }, req, { head: isHead })
+          return sendAdminJson(res, 200, bindPortal.overview(), req, { head: isHead })
+        }
+
+        if (req.method === "POST" && rest === "/api/sync") {
+          if (!bindPortal.authorize(req)) return sendAdminJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" }, req, { head: isHead })
+          let input = {}
+          try {
+            const raw = await readBody(req)
+            input = raw ? JSON.parse(raw) : {}
+          } catch {
+            input = {}
+          }
+          return sendAdminJson(res, 200, await bindPortal.sync(input), req, { head: isHead })
+        }
+
+        return json(404, { ok: false, error: "未知接口" })
       }
 
       // ── 静态资源（打开页面时**零上游请求**）──
@@ -991,6 +1175,106 @@ function sendFile(res, file, opts = {}) {
 }
 
 /**
+ * 发 HTML（门户页面用；带 CORS，HEAD 只发头）。
+ *
+ * @param {import("node:http").ServerResponse} res
+ * @param {string} html
+ * @param {{head?: boolean, pna?: boolean, status?: number}} [opts]
+ */
+function sendHtml(res, html, opts = {}) {
+  const buf = Buffer.from(String(html ?? ""), "utf8")
+  res.writeHead(opts.status ?? 200, {
+    ...corsHeaders(opts.pna),
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store",
+    "content-length": String(buf.length),
+  })
+  res.end(opts.head ? undefined : buf)
+}
+
+/**
+ * 这个请求对外看到的 origin —— 固定二维码里要写死的那个地址。
+ *
+ * # 为什么不能直接用 `req.headers.host`
+ *
+ * 门户挂在反代后面时 `req.socket` 是 127.0.0.1，直接拼出来的是内网地址，
+ * 印到固定码上就永远扫不通。所以：显式配置（`publicBaseUrl`）最高；
+ * 否则信任 `x-forwarded-proto` / `x-forwarded-host`；再不行才用 Host。
+ *
+ * @param {import("node:http").IncomingMessage} req
+ * @param {string} fixed 显式配置的公网地址（空 = 没配）
+ * @returns {string} 形如 `https://bind.example.com`
+ */
+function requestOrigin(req, fixed) {
+  if (fixed) return fixed
+  const h = req?.headers ?? {}
+  const proto =
+    String(h["x-forwarded-proto"] ?? "").split(",")[0].trim() ||
+    (/** @type {any} */ (req?.socket)?.encrypted ? "https" : "http")
+  const host = String(h["x-forwarded-host"] ?? h.host ?? "").split(",")[0].trim() || "127.0.0.1"
+  return `${proto}://${host}`
+}
+
+/**
+ * 1×1 透明 PNG（固定码生成失败时的兜底图，避免页面上只显示一个裂图）。
+ *
+ * @type {Buffer}
+ */
+const PLACEHOLDER_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8AAAwAB/wHq6pjjAAAAAElFTkSuQmCC",
+  "base64",
+)
+
+/** 请求来源 IP（反代后面取 `x-forwarded-for` 的**最后一段**）。 */
+function clientIp(req) {
+  const h = req?.headers ?? {}
+  const chain = String(h["x-forwarded-for"] ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+  // ⚠ 取最后一段：`$proxy_add_x_forwarded_for` 是**追加**，客户端伪造的部分在左边。
+  //   取第一段等于让攻击者换个头就绕过节流。
+  return chain.length ? chain[chain.length - 1] : String(req?.socket?.remoteAddress ?? "")
+}
+
+/**
+ * 管理接口的 CORS 头。
+ *
+ * # 为什么不能沿用通配 `*`
+ *
+ * 面板整个服务都用 `Access-Control-Allow-Origin: *`（页面是 `file:` 加载的，必须给）。
+ * 但 `/bind/api/pool`（账号清单）与 `/bind/api/sync`（会拿 token 挨个打平台）是**管理接口**：
+ * 一旦允许任意站点跨域读取，任何一条公网网页都能在你本机浏览器里把池子读走、把 sync 打满
+ * —— 本机回环判定在这里完全没有防线作用。
+ *
+ * 所以：只对「无 Origin」/「Origin: null（file: 面板）」/「回环 Origin」回 CORS 头，
+ * 其它站点一律不回，浏览器就拒绝把响应交给页面。
+ *
+ * @param {import("node:http").IncomingMessage} req
+ * @returns {Record<string, string>}
+ */
+function adminCorsHeaders(req) {
+  const origin = String(req?.headers?.origin ?? "").trim()
+  if (!origin) return { Vary: "Origin" }
+  if (origin === "null") return { "Access-Control-Allow-Origin": "null", Vary: "Origin" }
+  if (/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(origin)) {
+    return { "Access-Control-Allow-Origin": origin, Vary: "Origin" }
+  }
+  return { Vary: "Origin" }
+}
+
+/** 发管理接口的 JSON（CORS 按 `adminCorsHeaders`，不给通配）。 */
+function sendAdminJson(res, status, obj, req, opts = {}) {
+  const text = JSON.stringify(obj)
+  res.writeHead(status, {
+    ...adminCorsHeaders(req),
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+  })
+  res.end(opts.head ? undefined : text)
+}
+
+/**
  * 面板服务的**宿主侧**：自己 listen（magpie 只负责把 options 传进来）。
  *
  * @param {{client?: any, directory?: string}} [input]
@@ -1018,6 +1302,11 @@ export const QuWorkPage = async (input = {}, options = {}) => {
     log: input?.client?.app?.log ? { warn: (m) => input.client.app.log({ body: { service: "quwork", level: "warn", message: m } }) } : console,
     fetchImpl: options?.fetchImpl,
     credential: options?.credential,
+    // 微信绑定门户：公网地址（印发固定码的那个域名）、管理 token、按 IP 节流窗口
+    publicBaseUrl: options?.publicBaseUrl,
+    bindAdminToken: options?.bindAdminToken,
+    allocateWindowMs: options?.allocateWindowMs,
+    checkWindowMs: options?.checkWindowMs,
   })
 
   return new Promise((resolve) => {
