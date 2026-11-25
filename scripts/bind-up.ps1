@@ -1,12 +1,12 @@
-// scripts/bind-up.ps1 一键把「门户 + 隧道」拉起来（重启电脑后跑这一条）。
-//
-// 用法（PowerShell）：
-//   cd G:\trae\R1\fandai\repos\magpie-quwork
-//   pwsh -File scripts\bind-up.ps1              # 起门户 + 隧道，并打印当前公网地址
-//   pwsh -File scripts\bind-up.ps1 -Release     # 先清掉所有占位，再起（号全部回池子）
-//   pwsh -File scripts\bind-up.ps1 -Stop        # 只停掉正在跑的门户/隧道
-//
-// 它不会碰 magpie（不重启、不改配置），只在本机占用 4400 端口并起 cloudflared。
+# scripts/bind-up.ps1 一键把「门户 + 隧道」拉起来（重启电脑后跑这一条）。
+#
+# 用法（PowerShell）：
+#   cd G:\trae\R1\fandai\repos\magpie-quwork
+#   pwsh -File scripts\bind-up.ps1              # 起门户 + 隧道，并打印当前公网地址
+#   pwsh -File scripts\bind-up.ps1 -Release     # 先清掉所有占位，再起（号全部回池子）
+#   pwsh -File scripts\bind-up.ps1 -Stop        # 只停掉正在跑的门户/隧道
+#
+# 它不会碰 magpie（不重启、不改配置），只在本机占用 4400 端口并起 cloudflared。
 
 param(
   [switch]$Release,
