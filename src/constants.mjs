@@ -107,5 +107,8 @@ export const CATALOG_TIMEOUT_MS = 10_000
 /** 平台接口超时。 */
 export const PLATFORM_TIMEOUT_MS = 10_000
 
+/** 余额耗尽后让路由跳过该号的冷却时长；到期 magpie 重读额度，充上值即自动恢复。 */
+export const EXHAUSTED_REST_MS = 30 * 60 * 1000
+
 /** `plugin-auth.json` 里的键前缀（magpie 多账号命名规则）。 */
 export const AUTH_KEY = PROVIDER

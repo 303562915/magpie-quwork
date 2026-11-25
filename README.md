@@ -487,7 +487,7 @@ location /bind {
 
 ```bash
 cd D:\project_GIT\magpie-plugins\magpie-quwork
-node --test            # 全绿（当前 259 条）
+node --test            # 全绿（当前 262 条）
 node -e "import('./index.mjs').then(m=>console.log(Object.keys(m)))"
 # → [ 'QuWorkAuthPlugin', '_internal' ]
 ```
@@ -513,7 +513,7 @@ src/refresh.mjs            续期（2h 兜底 / <1h 触发 / 60s 节流）
 src/wechat-bind.mjs        绑定门户：账号池快照 / 占位锁 / 会话 / 平台签发 state
 src/bind-pages.mjs         门户 HTML（落地页 / 出码页 / 没号页 / 出错页，手机优先）
 src/qr.mjs                 零依赖二维码编码器（字节模式，版本 1~10，ECC L/M/Q/H）+ PNG
-tests/*.test.mjs           259 条
+tests/*.test.mjs           262 条
 ```
 
 ## 9. 出处
