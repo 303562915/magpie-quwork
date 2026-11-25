@@ -386,7 +386,7 @@ curl -s http://127.0.0.1:4392/任意路径 | head -c 60   # SPA 兜底：回面�
 ```
 别人扫固定码
   → 打开 <你的域名>/bind/go
-  → 服务端从账号池里挑一个 wechat_bound=false 的号（占位锁 5 分钟）
+  → 服务端从账号池里挑一个 wechat_bound=false 的号（占位锁 1 分半）
   → 喂它 GET /api/oauth/wechat/url（Bearer = 该号的平台 token）拿到**平台签发的 state**
   → 把那条授权 URL 渲染成二维码显示出来
   → 对方再扫一次、在微信里点「确认登录」
@@ -414,7 +414,12 @@ curl -s http://127.0.0.1:4392/任意路径 | head -c 60   # SPA 兜底：回面�
 | GET | `/bind/qr.png` | 无 | **固定二维码**（内容 = `<公网地址>/bind/go`，字节恒定、`no-store`） |
 | GET | `/bind/api/check?session=` | 无 | 轮询状态 `pending` / `bound` / `expired`（打上游：`/api/user/self`；每会话 1 秒一次）；返回体只有 `status`/`label` |
 | GET | `/bind/api/pool` | 有 | 池子概览（只读快照；**不含手机号 / token**） |
+| GET | `/bind/api/occupancy` | 有 | 当前占位（会话 / 锁 / 预留，只有数字） |
 | POST | `/bind/api/sync` | 有 | 重读全池（每个号一次 `/api/user/self`） |
+| POST | `/bind/api/release` | 有 | **释放所有占位**：把被占住的号立刻放回池子（已绑的号不受影响） |
+
+> 占位默认 1 分半（`SESSION_TTL_MS = 90 * 1000`），到期自动释放。被扫描器/不确认的人占住时，
+> 面板「扫码绑定 → 释放所有占位」点一下就行，不用重启门户。
 
 路由按**后缀**匹配，所以带前缀的代理路径（`/_magpie/plugin/<hash>/_magpie/service/bind/go`）也能用；
 页面里的链接与轮询都用绝对路径（`/bind` 的基准目录是 `/`，相对链接会掉回面板 HTML）。
@@ -542,7 +547,7 @@ location /bind {
 
 ### 已知未验证项
 
-1. **`state` 的有效期 / 是否一次性**：没实测。实现按「一次性 + 5 分钟」做（最安全的那一侧）。
+1. **`state` 的有效期 / 是否一次性**：没实测。实现按「一次性 + 1 分半」做（最安全的那一侧）。
 2. **一个微信号能否绑多个 QuWork 号**：没验证。若不能，运营方案要改成「一人帮绑一个」。
 3. 平台是否对 `/api/user/self` 限流：`/bind/api/check` 每 3 秒一次，多人同时扫会叠加，必要时把轮询间隔调大。
 

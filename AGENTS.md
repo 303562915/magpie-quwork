@@ -95,7 +95,7 @@
 | 17 | 门户绑到了**别的**账号 | 授权地址的 `state` 必须来自 `GET /api/oauth/wechat/url`（Bearer = 该号 token）；自己 `newState()` 造出来的只适合「粘 code 回来自己绑」 | `src/wechat-bind.mjs` 的 `fetchAuthorizeUrl()`、`src/wechat.mjs` 头部注释 |
 | 18 | 印出来的固定码扫了打不开 | `/bind/qr.png` 里的地址取「`publicBaseUrl` → `x-forwarded-*` → Host」；反代后没配 `QUWORK_BIND_PUBLIC_URL` 会拼成内网地址 | `server.mjs` 的 `requestOrigin()` |
 | 19 | 反代一切就绪后 `/bind/api/pool`、`/bind/api/sync` 对全网开放 | 反代后 `remoteAddress` 也是 127.0.0.1，所以「本机」判定必须**排除带 `x-forwarded-*` 的请求**；否则 `sync` 成了拿你 token 打平台的放大入口 | `src/wechat-bind.mjs` `authorize()`、`tests/wechat-bind.test.mjs §18` |
-| 20 | 一个脚本连点几下，别人再扫就全是「暂时没有可绑定账号」 | `/bind/go` 一次占一个号 5 分钟，必须按 IP 节流（默认 3 秒；`allocateWindowMs: 0` 关掉，仅供测试） | `server.mjs` 的 `allowAllocate()`、`tests/wechat-bind.test.mjs §22` |
+| 20 | 一个脚本连点几下，别人再扫就全是「暂时没有可绑定账号」 | `/bind/go` 一次占一个号 **1 分半**（`SESSION_TTL_MS = 90 * 1000`），必须按 IP 节流（默认 3 秒；`allocateWindowMs: 0` 关掉，仅供测试） | `server.mjs` 的 `allowAllocate()`、`tests/wechat-bind.test.mjs §22` |
 | 21 | 门户页面上的按钮跳到面板首页，或轮询 404 | 页面里的链接一律**绝对路径**（`<mount>/bind/go`）；`/bind` 的基准目录是 `/`，相对 `href="go"` 会变成 `/go` | `src/bind-pages.mjs` 的 `pathOf()`、`tests/wechat-bind.test.mjs §21` |
 | 22 | 随便打开一条公网网页，你的账号池就被读走 / sync 被打满 | 整站是 `ACAO: *`（file: 面板必须），管理接口必须**另发** CORS（只认 null / 回环 Origin）；只靠回环 IP 判「本机」在反代下没用 | `server.mjs` 的 `adminCorsHeaders()`、`src/wechat-bind.mjs` `authorize()`、`tests §23` |
 | 23 | 持一个 session 就能无限打 `/api/user/self` | `/bind/api/check` 按「IP+session」1 秒一次节流（`checkWindowMs`；被挡时回 `{status:"pending",throttled:true}`，不改页面文案） | `server.mjs` 的 `allowCheck()` |

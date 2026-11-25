@@ -283,6 +283,48 @@ test("§8 配了 adminToken：无 Bearer → 401，带 Bearer → 200", async (t
   assert.equal(synced.status, 200)
 })
 
+test("§29 releaseAll：一键把占位全放回池子（已绑的号不会被放回来）", async (t) => {
+  const platform = fakePlatform()
+  const dir = seed(t)
+  const portal = createBindPortal({ configDir: dir, platformBaseUrl: PLATFORM, fetchImpl: platform.fetchImpl })
+  await portal.sync()
+
+  // 占住两个号（模拟被扫描器拿走的码）
+  const a = await portal.allocate()
+  const b = await portal.allocate()
+  assert.equal(a.ok, true)
+  assert.equal(b.ok, true)
+  assert.deepEqual(portal.occupancy(), { sessions: 2, locks: 2, reserved: 0 })
+  assert.equal((await portal.allocate()).ok, false, "两个号都被占着，第三次分配应该没有号")
+
+  const rel = portal.releaseAll()
+  assert.equal(rel.releasedSessions, 2)
+  assert.equal(rel.releasedLocks, 2)
+  assert.deepEqual(portal.occupancy(), { sessions: 0, locks: 0, reserved: 0 })
+
+  // 释放后马上又能从 #1 开始分
+  const again = await portal.allocate()
+  assert.equal(again.ok, true)
+  assert.equal(again.label, "#1")
+  // 被释放的旧会话不再是 pending（再轮询应报过期），不会和新人抢同一个号
+  assert.equal((await portal.check(a.sessionId)).status, "expired")
+})
+
+test("§29b 真绑上的号不会被 releaseAll 放回池子", async (t) => {
+  const platform = fakePlatform({ bound: new Set(["tok-aaa"]) })
+  const dir = seed(t)
+  const portal = createBindPortal({ configDir: dir, platformBaseUrl: PLATFORM, fetchImpl: platform.fetchImpl })
+  await portal.sync() // 快照会记下 #1 已绑
+
+  const alloc = await portal.allocate()
+  assert.equal(alloc.label, "#2", "已绑的 #1 不参与分配")
+
+  portal.releaseAll()
+  const next = await portal.allocate()
+  assert.equal(next.label, "#2", "释放占位后 #1 仍然不会被发出去")
+  assert.equal(poolOverview({ configDir: dir }).bound, 1)
+})
+
 // ── ⑨ token 失效的账号不参与分配 ────────────────────────────────────────
 test("§9 上游 401 的账号标记 tokenInvalid，不参与分配", async (t) => {
   const platform = fakePlatform({ dead: new Set(["tok-aaa"]) })
@@ -603,6 +645,24 @@ test("§22b 非法窗口值不能把节流静默关掉", async (t) => {
   await fetch(`${base}/bind/go`)
   const second = await fetch(`${base}/bind/go`).then((r) => r.text())
   assert.match(second, /操作太快了/, "NaN 窗口要回落成默认 3s，而不是 0")
+})
+
+test("§28 会话默认有效期 1 分半（90s），页面倒计时与轮询次数跟着对齐", async (t) => {
+  const { SESSION_TTL_MS } = await import("../src/wechat-bind.mjs")
+  assert.equal(SESSION_TTL_MS, 90_000, "默认占位时间应是 90 秒")
+
+  const { base } = await startServer(t)
+  const go = await fetch(`${base}/bind/go`).then((r) => r.text())
+  // 页面把 ttl 直接写进倒计时（`Date.now() + ttlMs`）
+  assert.match(go, /var deadline = Date\.now\(\) \+ 90000;/, "倒计时要按 90s 来")
+  // 每 3 秒一轮，1 分半 = 30 轮，留一点余量
+  assert.match(go, /if \(tries > 45\)/, "轮询上限要跟着缩短")
+
+  // 服务端也要按 90s 判过期
+  const body = await fetch(`${base}/bind/go`).then((r) => r.text())
+  const session = (body.match(/var sid = "([^"]+)"/) ?? [])[1]
+  const st = await fetch(`${base}/bind/api/check?session=${session}`).then((r) => r.json())
+  assert.ok(st.remainingMs <= 90_000 && st.remainingMs > 80_000, `剩余时间应 ≈90s，实际 ${st.remainingMs}`)
 })
 
 test("§27 出码页必须明确「用微信扫一扫直接扫，相册/长按识别无效」", async (t) => {

@@ -184,6 +184,44 @@ test("B9 绑定成功要单独落一行 BOUND（回答「有人绑定了吗」�
   assert.match(text, /BOUND label=#1 ip=127\.0\.0\.1/, `日志里应有 BOUND 行：${text}`)
 })
 
+test("B10 POST /api/release：一键释放所有占位，之后重新从 #1 分配", async (t) => {
+  const logFile = join(tempDir(t), "access.log")
+  const platform = fakeFetch()
+  const server = createBindServer({
+    configDir: seed(t),
+    platformBaseUrl: PLATFORM,
+    fetchImpl: platform.fetchImpl,
+    logFile,
+    allocateWindowMs: 0,
+    checkWindowMs: 0,
+    log: { warn() {} },
+  })
+  await new Promise((done) => server.listen(0, "127.0.0.1", done))
+  const base = `http://127.0.0.1:${server.address().port}`
+  t.after(() => new Promise((done) => server.close(() => done())))
+
+  const a = await fetch(`${base}/bind/go`).then((r) => r.text())
+  assert.match(a, /待绑定账号 #1/)
+  assert.deepEqual(await fetch(`${base}/bind/api/occupancy`).then((r) => r.json()), { ok: true, sessions: 1, locks: 1, reserved: 0 })
+
+  const rel = await fetch(`${base}/bind/api/release`, { method: "POST" }).then((r) => r.json())
+  assert.equal(rel.ok, true)
+  assert.equal(rel.releasedLocks, 1)
+  assert.deepEqual(await fetch(`${base}/bind/api/occupancy`).then((r) => r.json()), { ok: true, sessions: 0, locks: 0, reserved: 0 })
+
+  const b = await fetch(`${base}/bind/go`).then((r) => r.text())
+  assert.match(b, /待绑定账号 #1/, "释放后重新从 #1 开始")
+  await new Promise((done) => setTimeout(done, 100))
+  assert.match(readFileSync(logFile, "utf8"), /RELEASE 释放占位会话=1 锁=1 预留=0/)
+})
+
+test("B10b 管理接口仍然要鉴权（release / occupancy 不能裸奔）", async (t) => {
+  const { base } = await start(t, { adminToken: "s3cret" })
+  assert.equal((await fetch(`${base}/bind/api/release`, { method: "POST" })).status, 401)
+  assert.equal((await fetch(`${base}/bind/api/occupancy`)).status, 401)
+  assert.equal((await fetch(`${base}/bind/api/occupancy`, { headers: { authorization: "Bearer s3cret" } })).status, 200)
+})
+
 test("B6 会话过期后 check 返回 expired（不是一直 pending）", async (t) => {
   let clock = 1_700_000_000_000
   const platform = fakeFetch()

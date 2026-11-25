@@ -938,6 +938,19 @@ on($("bind-sync"), async () => {
   void loadAccounts()
 })
 
+/**
+ * 释放所有占位。
+ *
+ * 场景：有人（或扫描器）拿了码不确认，把号占住了 1 分半，真正想绑的人扫进来就是
+ * 「暂时没有可绑定的账号」。点一下把占位全放回池子 —— **已绑的号不会被放回来**。
+ */
+on($("bind-release"), async () => {
+  const d = await api("/bind/api/release", {})
+  $("bind-note").textContent = `已释放：会话 ${d.releasedSessions ?? 0} · 锁 ${d.releasedLocks ?? 0}`
+  if (d.overview) renderBind(d.overview)
+  toast(`已释放 ${d.releasedLocks ?? 0} 个占位`)
+})
+
 ;(function initBindStatic() {
   const qr = $("bind-qr")
   if (qr) qr.src = `${BASE}/bind/qr.png`

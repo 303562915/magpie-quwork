@@ -233,6 +233,26 @@ export function createBindServer(opts = {}) {
         return sendJson(res, 200, { ...r, overview: portal.overview() })
       }
 
+      // 手动释放所有占位（有人拿着码不确认、或要重新从 #1 开始分配时用）
+      if (req.method === "POST" && rest === "/api/release") {
+        if (!portal.authorize(req)) return sendJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" })
+        const r = portal.releaseAll()
+        if (logFile) {
+          try {
+            appendFileSync(logFile, `${new Date().toISOString()} RELEASE 释放占位会话=${r.releasedSessions} 锁=${r.releasedLocks} 预留=${r.releasedReserved} ip=${ipOf(req)}\n`, "utf8")
+          } catch {
+            /* 日志失败不影响结果 */
+          }
+        }
+        return sendJson(res, 200, r)
+      }
+
+      // 当前占位（只给数字，不含账号信息）
+      if (isGet && rest === "/api/occupancy") {
+        if (!portal.authorize(req)) return sendJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" })
+        return sendJson(res, 200, { ok: true, ...portal.occupancy() })
+      }
+
       res.writeHead(404, { "content-type": "text/plain; charset=utf-8" })
       return res.end("not found")
     } catch (e) {

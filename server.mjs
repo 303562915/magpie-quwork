@@ -316,7 +316,7 @@ export function createPageServer(opts = {}) {
    *
    * # 为什么需要它
    *
-   * 一次分配 = 2 次上游 + 占住一个号 5 分钟。没有节流时，一个脚本连点几下就能把
+   * 一次分配 = 2 次上游 + 占住一个号 1 分半。没有节流时，一个脚本连点几下就能把
    * 整个池子的号全占住，别人再扫就只剩「暂时没有可绑定的账号」。
    * 窗口只是防呆，不是安全边界；`allocateWindowMs = 0` 可关掉（测试用）。
    */
@@ -1005,7 +1005,7 @@ export function createPageServer(opts = {}) {
         }
 
         if (isGet && rest === "/go") {
-          // 同一个 IP 3 秒内只发一次码：一次分配 = 2 次上游 + 占一个号 5 分钟，
+          // 同一个 IP 3 秒内只发一次码：一次分配 = 2 次上游 + 占一个号 1 分半，
           // 被脚本狂刷会把整个池子锁死。
           if (!allowAllocate(clientIp(req))) {
             return sendHtml(res, errorPage("操作太快了，请等几秒再扫一次", { mount }), { head: isHead, pna, status: 200 })
@@ -1087,6 +1087,18 @@ export function createPageServer(opts = {}) {
             input = {}
           }
           return sendAdminJson(res, 200, await bindPortal.sync(input), req, { head: isHead })
+        }
+
+        // 手动释放所有占位（有人拿着码不确认挡住别人时用）
+        if (req.method === "POST" && rest === "/api/release") {
+          if (!bindPortal.authorize(req)) return sendAdminJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" }, req, { head: isHead })
+          return sendAdminJson(res, 200, bindPortal.releaseAll(), req, { head: isHead })
+        }
+
+        // 当前占位（只给数字，不含账号信息）
+        if (isGet && rest === "/api/occupancy") {
+          if (!bindPortal.authorize(req)) return sendAdminJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" }, req, { head: isHead })
+          return sendAdminJson(res, 200, { ok: true, ...bindPortal.occupancy() }, req, { head: isHead })
         }
 
         return json(404, { ok: false, error: "未知接口" })

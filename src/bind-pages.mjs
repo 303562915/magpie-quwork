@@ -132,7 +132,7 @@ export function landingPage(opts = {}) {
   <h1>帮我们绑一个账号</h1>
   <p>点下面的按钮，页面会分给你一个<strong>还没绑定微信</strong>的账号，再用微信扫它给的码、点「确认登录」就完成了。</p>
   <div class="alert">必须用微信「扫一扫」直接扫码<small>相册选图 / 长按识别 打开的一律无效</small></div>
-  <p class="hint">每个账号只会分给一个人；分到之后 5 分钟内有效，被占用的账号会重新回到池子里。</p>
+  <p class="hint">每个账号只会分给一个人；分到之后 1 分半内有效，超时要重新扫；被占用的账号会自动回到池子里。</p>
   <a class="btn" href="${esc(go)}">开始绑定</a>
   <p class="hint">当前可分配 <strong>${available}</strong> 个 · 已绑定 <strong>${bound}</strong> / 共 ${total} 个</p>
 </div>`
@@ -185,7 +185,7 @@ export function goPage(opts) {
   var tries = 0;
   var loop = setInterval(function () {
     tries += 1;
-    if (tries > 120) { clearInterval(loop); clearInterval(timer); return; }
+    if (tries > 45) { clearInterval(loop); clearInterval(timer); return; }
     fetch(checkUrl + "?session=" + encodeURIComponent(sid), { cache: "no-store" })
       .then(function (r) { return r.json(); })
       .then(function (j) {

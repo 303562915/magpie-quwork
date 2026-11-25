@@ -40,7 +40,7 @@ import { readAll } from "./auth-store.mjs"
 export const BIND_POOL_FILE = "quwork-bind-pool.json"
 
 /** 一次扫码会话的有效期（= 占位锁的持有时间）。 */
-export const SESSION_TTL_MS = 5 * 60 * 1000
+export const SESSION_TTL_MS = 90 * 1000
 
 /** 账号池快照多久算旧（超过就在「没有可用账号」时才去重读一次上游）。 */
 export const POOL_TTL_MS = 5 * 60 * 1000
@@ -446,6 +446,35 @@ export function createBindPortal(opts) {
     /** 池子概览（只读）。 */
     overview() {
       return poolOverview({ configDir })
+    },
+
+    /**
+     * 释放**所有**占位（会话 / 锁 / 预留），把号全部还回池子。
+     *
+     * # 什么时候需要它
+     *
+     * 占位锁只有 1 分半，到期会自动释放；但遇到这两种情况得手动清：
+     *
+     *	· 有人（或扫描器）拿着码不确认，占着号挡住了真正想绑的人；
+     *	· 要停机/换域名，想让下一批扫码的人立刻从 #1 重新开始分配。
+     *
+     * ⚠ 只清「占位」，**不动**快照里的 `wechatBound`：已经真的绑上微信的号不会被放回来。
+     *
+     * @returns {{ok: true, releasedSessions: number, releasedLocks: number, releasedReserved: number}}
+     */
+    releaseAll() {
+      const releasedSessions = sessions.size
+      const releasedLocks = locks.size
+      const releasedReserved = reserved.size
+      sessions.clear()
+      locks.clear()
+      reserved.clear()
+      return { ok: true, releasedSessions, releasedLocks, releasedReserved, overview: poolOverview({ configDir }) }
+    },
+
+    /** 当前占位状态（不含任何账号信息，只给数字）。 */
+    occupancy() {
+      return { sessions: sessions.size, locks: locks.size, reserved: reserved.size }
     },
 
     /** 手动刷新池子（面板按钮 / 运维用）。 */
