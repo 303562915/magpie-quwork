@@ -26,7 +26,7 @@ import { homedir } from "node:os"
 import { pathToFileURL } from "node:url"
 
 import { createBindPortal, refreshPool } from "../src/wechat-bind.mjs"
-import { errorPage, goPage, landingPage, noAccountPage } from "../src/bind-pages.mjs"
+import { errorPage, goPage, landingPage, noAccountPage, wallPage } from "../src/bind-pages.mjs"
 import { qrPng } from "../src/qr.mjs"
 
 /** 1×1 透明 PNG（固定码生成失败时的兜底图）。 */
@@ -86,6 +86,8 @@ export function createBindServer(opts = {}) {
 
   const rawAlloc = Number(opts.allocateWindowMs ?? 3000)
   const allocateWindowMs = Number.isFinite(rawAlloc) ? Math.max(0, rawAlloc) : 3000
+  const rawWall = Number(opts.wallWindowMs ?? 15000)
+  const wallWindowMs = Number.isFinite(rawWall) ? Math.max(0, rawWall) : 15000
   const rawCheck = Number(opts.checkWindowMs ?? 1000)
   const checkWindowMs = Number.isFinite(rawCheck) ? Math.max(0, rawCheck) : 1000
   const hits = new Map()
@@ -167,6 +169,42 @@ export function createBindServer(opts = {}) {
       if (isGet && (rest === "" || rest === "/index.html")) {
         const ov = portal.overview()
         return sendHtml(res, landingPage({ total: ov.total, available: ov.available, bound: ov.bound, mount }))
+      }
+
+      // 阵列页：一屏多个待绑定账号，每格一张专属码（群里发这个，谁扫哪格都行）
+      if (isGet && rest === "/wall") {
+        if (!allow(`wall|${ipOf(req)}`, wallWindowMs)) {
+          return sendHtml(res, errorPage("操作太快了，请等几秒再刷新", { mount }))
+        }
+        const want = Math.max(1, Math.min(24, Number(url.searchParams.get("n")) || 6))
+        /** @type {Array<{sessionId: string, label: string, qrDataUri: string, ttlMs: number}>} */
+        const cards = []
+        const seen = new Set()
+        for (let i = 0; i < want; i += 1) {
+          const r = await portal.allocate()
+          if (!r.ok) break
+          if (seen.has(r.key)) {
+            // 不该发生（占位锁保证），真发生了也别重复展示
+            break
+          }
+          seen.add(r.key)
+          let qrDataUri = ""
+          try {
+            qrDataUri = `data:image/png;base64,${qrPng(r.authorizeUrl, { ecl: "L", scale: 6, border: 3 }).toString("base64")}`
+          } catch {
+            qrDataUri = ""
+          }
+          cards.push({ sessionId: r.sessionId, label: r.label, qrDataUri, ttlMs: r.ttlMs })
+        }
+        const ov = portal.overview()
+        return sendHtml(
+          res,
+          wallPage({
+            mount,
+            cards,
+            remainNote: `池子里还有 ${Math.max(0, ov.available - cards.length)} 个没绑的号；没有空位就等 3 分钟再刷新。`,
+          }),
+        )
       }
 
       if (isGet && rest === "/go") {

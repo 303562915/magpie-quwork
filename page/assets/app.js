@@ -956,6 +956,8 @@ on($("bind-release"), async () => {
   if (qr) qr.src = `${BASE}/bind/qr.png`
   const open = $("bind-open")
   if (open) open.href = `${BASE}/bind`
+  const wall = $("bind-wall")
+  if (wall) wall.href = `${BASE}/bind/wall`
   const target = $("bind-target")
   if (target) target.textContent = `${BASE}/bind/go`
 })()

@@ -37,6 +37,52 @@ function pathOf(mount, sub) {
   return `${m}${sub}`
 }
 
+/**
+ * 门户页面里通用的「轮询 + 自动续码」脚本。
+ *
+ * # 为什么抽出来
+ *
+ * 出码页（`/bind/go`）和阵列页（`/bind/wall`）面对的是同一件事：
+ * 一张码 3 分钟就会作废，但**会话可以续**。两边必须用同一套：
+ * 拿 `{status, qr, qrUrl, ttlMs, renewed}` 解释成「换图 / 收工 / 放弃」。
+ *
+ * @returns {string} 内联脚本（已被 layout 放进 `<script>`）
+ */
+function pollScript() {
+  return `
+/**
+ * 轮询一个会话，直到 bound / expired / 超时。
+ *   onBound(label)   绑定成功
+ *   onRenew(info)    服务端给了新码（info.qr / info.qrUrl / info.ttlMs）
+ *   onGone(message)  这个会话没救了
+ */
+window.__bindPoll = function (opts) {
+  var sid = opts.session;
+  var checkUrl = opts.checkUrl;
+  var interval = opts.interval || 3000;
+  var hardStop = Date.now() + (opts.maxWait || 1800000);
+  var onBound = opts.onBound || function () {};
+  var onRenew = opts.onRenew || function () {};
+  var onGone = opts.onGone || function () {};
+  var lastRenew = 0;
+  var timer = setInterval(function () {
+    if (Date.now() > hardStop) { clearInterval(timer); onGone("等待超时"); return; }
+    fetch(checkUrl + "?session=" + encodeURIComponent(sid), { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j.status === "bound") { clearInterval(timer); onBound(j.label || ""); return; }
+        if (j.status === "expired") { clearInterval(timer); onGone(j.message || "已失效"); return; }
+        // ⚠ 服务端每次轮询都可能发现「已过期」并续一张新码；只在 renewed 时换图，
+        //   否则会把同一张图每 3 秒重设一遍（浏览器 flash + 浪费时间）
+        if (j.qr && j.renewed && j.qr !== lastRenew) { lastRenew = j.qr; onRenew(j); }
+      })
+      .catch(function () {});
+  }, interval);
+  return function stop() { clearInterval(timer); };
+};
+`
+}
+
 /** 所有门户页面共用的样式（内联，不依赖外部资源）。 */
 const CSS = `
 :root { color-scheme: light dark; }
@@ -79,6 +125,29 @@ p { margin: 8px 0; color: #4b5563; font-size: 14px; }
 .warn { color: #b45309; }
 .timer { font-variant-numeric: tabular-nums; }
 footer { color: #9ca3af; font-size: 12px; }
+
+/* ── 阵列页（/bind/wall）：一屏多个待绑定账号 ── */
+.card.wide { max-width: 980px; }
+.grid {
+  display: grid; gap: 12px; margin: 14px 0;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+}
+.cell {
+  border: 1px solid #e5e7eb; border-radius: 14px; padding: 10px;
+  display: flex; flex-direction: column; gap: 8px; align-items: center;
+  transition: opacity .2s, border-color .2s;
+}
+.cell-head { display: flex; width: 100%; justify-content: space-between; align-items: center; gap: 6px; }
+.cell-head .timer { font-size: 13px; color: #6b7280; }
+.qr-sm { width: 100%; max-width: 130px; height: auto; image-rendering: pixelated; border-radius: 6px; }
+.cell-note { margin: 0; font-size: 12px; color: #4b5563; text-align: center; }
+.cell.is-done { border-color: #07c160; background: #f0fdf4; }
+.cell.is-gone { opacity: .45; }
+@media (prefers-color-scheme: dark) {
+  .cell { border-color: #2a303c; }
+  .cell-note { color: #9ca3af; }
+  .cell.is-done { background: #0f2419; }
+}
 @media (prefers-color-scheme: dark) {
   body { background: #0f1115; color: #e5e7eb; }
   .card { background: #171a21; box-shadow: none; }
@@ -125,6 +194,7 @@ export function landingPage(opts = {}) {
   const available = Number(opts.available) || 0
   const bound = Number(opts.bound) || 0
   const go = pathOf(opts.mount, "/bind/go")
+  const wall = pathOf(opts.mount, "/bind/wall")
 
   const body = `
 <div class="card">
@@ -134,9 +204,130 @@ export function landingPage(opts = {}) {
   <div class="alert">必须用微信「扫一扫」直接扫码<small>相册选图 / 长按识别 打开的一律无效</small></div>
   <p class="hint">每个账号只会分给一个人；分到之后 3 分钟内有效，过期会自动换新码；没人扫的账号会自动回到池子里。</p>
   <a class="btn" href="${esc(go)}">开始绑定</a>
+  <a class="btn secondary" href="${esc(wall)}">看全部待绑定账号（群里发这个也行）</a>
   <p class="hint">当前可分配 <strong>${available}</strong> 个 · 已绑定 <strong>${bound}</strong> / 共 ${total} 个</p>
 </div>`
   return layout({ title: "微信绑定", body })
+}
+
+/**
+ * 阵列页：一屏排开若干「待绑定账号 #X」卡片，每张卡片一个专属码 + 倒计时。
+ *
+ * # 给谁用
+ *
+ * 发到群里：谁想帮就扫其中**任意一张**；扫了哪张，那个号就归他，其它卡片照常在。
+ * 每张卡片独立续码（3 分钟过期 → 服务端换新码 → 卡片原地换图），互不影响。
+ *
+ * @param {{mount?: string, cards?: Array<{sessionId: string, label: string, qrDataUri: string,
+ *   ttlMs: number}>, maxWaitMs?: number, pollMs?: number, remainNote?: string}} opts
+ * @returns {string}
+ */
+export function wallPage(opts = {}) {
+  const mount = String(opts.mount ?? "")
+  const checkUrl = pathOf(mount, "/bind/api/check")
+  const go = pathOf(mount, "/bind/go")
+  const wall = pathOf(mount, "/bind/wall")
+  const pollMs = Math.max(1000, Number(opts.pollMs) || 3000)
+  const maxWaitMs = Math.max(180_000, Number(opts.maxWaitMs) || 30 * 60 * 1000)
+  const cards = Array.isArray(opts.cards) ? opts.cards : []
+
+  if (cards.length === 0) {
+    const body = `
+<div class="card">
+  <span class="badge">暂时没有空位</span>
+  <h1>现在没有可绑定的账号</h1>
+  <p>所有账号要么已经绑好了，要么正被其他人扫着。请过几分钟刷新本页。</p>
+  <a class="btn" href="${esc(wall)}">刷新</a>
+</div>`
+    return layout({ title: "暂时没有空位", body })
+  }
+
+  const grid = cards
+    .map(
+      (c, i) => `<div class="cell" id="cell-${i}">
+        <div class="cell-head"><span class="badge">待绑定 ${esc(c.label)}</span><span class="timer" id="left-${i}">--:--</span></div>
+        <img class="qr-sm" id="qr-${i}" src="${esc(c.qrDataUri)}" alt="微信扫码绑定 ${esc(c.label)}">
+        <p class="cell-note" id="note-${i}">用微信扫一扫</p>
+      </div>`,
+    )
+    .join("")
+
+  const meta = JSON.stringify(
+    cards.map((c, i) => ({ i, session: String(c.sessionId ?? ""), ttl: Math.max(0, Number(c.ttlMs) || 0) })),
+  ).replace(/</g, "\\u003c")
+
+  const body = `
+<div class="card wide">
+  <span class="badge">共 ${cards.length} 个待绑定账号</span>
+  <h1>随便挑一个扫，帮我们绑一个号</h1>
+  <div class="alert">必须用微信「扫一扫」直接扫下面任意一张<small>相册选图 / 长按识别 无效；扫完在微信里点「确认登录」</small></div>
+  <p class="hint">每张码有效期 3 分钟，过期会自己换新码，不用管；扫成功的那一格会变「已绑定」，别的格子照常可用。</p>
+  <div class="grid">${grid}</div>
+  <p class="hint"><a href="${esc(wall)}">刷新本页</a> · <a href="${esc(go)}">只给我一个号</a></p>
+  ${opts.remainNote ? `<p class="hint">${esc(opts.remainNote)}</p>` : ""}
+</div>`
+
+  const script = `
+(function () {
+  var cards = ${meta};
+  var checkUrl = ${JSON.stringify(checkUrl).replace(/</g, "\\u003c")};
+  var interval = ${pollMs};
+  var maxWait = ${maxWaitMs};
+  var deadline = [];
+  function tick() {
+    for (var k = 0; k < cards.length; k += 1) {
+      var el = document.getElementById("left-" + k);
+      if (!el || !deadline[k]) continue;
+      var s = Math.max(0, Math.round((deadline[k] - Date.now()) / 1000));
+      el.textContent = String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
+    }
+  }
+  /** 每格独立轮询：状态可能是 bound / 换新码(renewed) / 失效。 */
+  function watch(k, session) {
+    var started = Date.now();
+    var lastQr = "";
+    var timer = setInterval(function () {
+      if (Date.now() - started > maxWait) { clearInterval(timer); return; }
+      fetch(checkUrl + "?session=" + encodeURIComponent(session), { cache: "no-store" })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          var note = document.getElementById("note-" + k);
+          var img = document.getElementById("qr-" + k);
+          var cell = document.getElementById("cell-" + k);
+          if (j.status === "bound") {
+            clearInterval(timer);
+            if (cell) cell.classList.add("is-done");
+            if (note) note.innerHTML = '<span class="ok">已绑定 ✓</span>';
+            if (img) img.style.opacity = ".15";
+            deadline[k] = 0;
+            return;
+          }
+          if (j.status === "expired") {
+            clearInterval(timer);
+            if (cell) cell.classList.add("is-gone");
+            if (note) note.textContent = j.message || "已失效，刷新本页";
+            deadline[k] = 0;
+            return;
+          }
+          if (j.qr && j.renewed && j.qr !== lastQr) {
+            lastQr = j.qr;
+            if (img) img.src = j.qr;
+            deadline[k] = Date.now() + (j.ttlMs || 0);
+            if (note) note.textContent = "换新码了，重新扫这张";
+          }
+        })
+        .catch(function () {});
+    }, interval);
+  }
+  cards.forEach(function (c, k) {
+    deadline[k] = Date.now() + c.ttl;
+    if (c.session) watch(k, c.session);
+  });
+  tick();
+  setInterval(tick, 1000);
+})();
+`
+  return layout({ title: "待绑定账号", body, script })
 }
 
 /**

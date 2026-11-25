@@ -34,7 +34,7 @@ import { rememberUsage, windowsFromSelf } from "./src/hooks/usage.mjs"
 import { refreshCatalogCache } from "./src/hooks/models.mjs"
 import { buildAuthorizeUrl, bindWechat, exchangeCode, newState, parseCallback } from "./src/wechat.mjs"
 import { createBindPortal } from "./src/wechat-bind.mjs"
-import { errorPage, goPage, landingPage, noAccountPage } from "./src/bind-pages.mjs"
+import { errorPage, goPage, landingPage, noAccountPage, wallPage } from "./src/bind-pages.mjs"
 import { qrPng } from "./src/qr.mjs"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -328,6 +328,17 @@ export function createPageServer(opts = {}) {
   const rawCheck = Number(opts.checkWindowMs ?? 1000)
   const checkWindowMs = Number.isFinite(rawCheck) ? Math.max(0, rawCheck) : 1000
   const checkHits = new Map()
+  /** `/bind/wall` 的节流：每 IP 15 秒一次（一次刷新会占 N 个号）。 */
+  const wallHits = new Map()
+  const allowWall = (ip, windowMs = 15000) => {
+    const key = String(ip || "")
+    const t = now()
+    const last = Number(wallHits.get(key) ?? 0)
+    if (t - last < windowMs) return false
+    wallHits.set(key, t)
+    if (wallHits.size > 2000) for (const [k, v] of [...wallHits.entries()].sort((a, b) => a[1] - b[1]).slice(0, 500)) wallHits.delete(k)
+    return true
+  }
   const allowCheck = (ip, session) => {
     if (!(checkWindowMs > 0)) return true
     const key = `${String(ip || "")}|${String(session || "")}`
@@ -1000,6 +1011,35 @@ export function createPageServer(opts = {}) {
           return sendHtml(
             res,
             landingPage({ total: ov.total, available: ov.available, bound: ov.bound, mount }),
+            { head: isHead, pna, status: 200 },
+          )
+        }
+
+        // 阵列页：一屏多个待绑定账号（群里发这个，谁扫哪一格都行）
+        if (isGet && rest === "/wall") {
+          if (!bindPortal.authorize(req) && !allowWall(clientIp(req))) {
+            return sendHtml(res, errorPage("操作太快了，请等几秒再刷新", { mount }), { head: isHead, pna, status: 200 })
+          }
+          const want = Math.max(1, Math.min(24, Number(url.searchParams.get("n")) || 6))
+          /** @type {Array<{sessionId: string, label: string, qrDataUri: string, ttlMs: number}>} */
+          const cards = []
+          const seen = new Set()
+          for (let i = 0; i < want; i += 1) {
+            const r = await bindPortal.allocate()
+            if (!r.ok || seen.has(r.key)) break
+            seen.add(r.key)
+            let qrDataUri = ""
+            try {
+              qrDataUri = `data:image/png;base64,${qrPng(r.authorizeUrl, { ecl: "L", scale: 6, border: 3 }).toString("base64")}`
+            } catch {
+              qrDataUri = ""
+            }
+            cards.push({ sessionId: r.sessionId, label: r.label, qrDataUri, ttlMs: r.ttlMs })
+          }
+          const ov = bindPortal.overview()
+          return sendHtml(
+            res,
+            wallPage({ mount, cards, remainNote: `池子里还有 ${Math.max(0, ov.available - cards.length)} 个没绑的号。` }),
             { head: isHead, pna, status: 200 },
           )
         }

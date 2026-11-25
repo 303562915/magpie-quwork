@@ -411,6 +411,7 @@ curl -s http://127.0.0.1:4392/任意路径 | head -c 60   # SPA 兜底：回面�
 |---|---|---|---|
 | GET | `/bind` | 无 | 说明页（只读快照，**零上游**） |
 | GET | `/bind/go` | 无 | 分配 + 出码（打上游 2 次：`/api/user/self` 实测 + `/api/oauth/wechat/url`；同一 IP 3 秒一次） |
+| GET | `/bind/wall?n=6` | 无 | **阵列页**：一屏 N 个待绑定账号，每格一张专属码 + 3 分钟倒计时；群里发这个链接，谁扫哪格都行（同 IP 15 秒一次） |
 | GET | `/bind/qr.png` | 无 | **固定二维码**（内容 = `<公网地址>/bind/go`，字节恒定、`no-store`） |
 | GET | `/bind/api/check?session=` | 无 | 轮询状态 `pending` / `bound` / `expired`（打上游：`/api/user/self`；每会话 1 秒一次）；返回体只有 `status`/`label` |
 | GET | `/bind/api/pool` | 有 | 池子概览（只读快照；**不含手机号 / token**） |

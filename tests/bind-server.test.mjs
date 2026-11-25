@@ -222,7 +222,73 @@ test("B10b 管理接口仍然要鉴权（release / occupancy 不能裸奔）", a
   assert.equal((await fetch(`${base}/bind/api/occupancy`, { headers: { authorization: "Bearer s3cret" } })).status, 200)
 })
 
-test("B6 会话过期后 check 返回 expired（不是一直 pending）", async (t) => {
+test("B11 /bind/wall：一屏多个待绑定账号，每格一个独立 session + 码 + 倒计时", async (t) => {
+  const platform = fakeFetch()
+  const dir = tempDir(t)
+  upsertAccount(dir, { llmToken: "sk-a", token: "tok-a", uid: "u1" })
+  upsertAccount(dir, { llmToken: "sk-b", token: "tok-b", uid: "u2" })
+  upsertAccount(dir, { llmToken: "sk-c", token: "tok-c", uid: "u3" })
+
+  const server = createBindServer({
+    configDir: dir,
+    platformBaseUrl: PLATFORM,
+    fetchImpl: platform.fetchImpl,
+    wallWindowMs: 0,
+    allocateWindowMs: 0,
+    checkWindowMs: 0,
+    log: { warn() {} },
+  })
+  await new Promise((done) => server.listen(0, "127.0.0.1", done))
+  const base = `http://127.0.0.1:${server.address().port}`
+  t.after(() => new Promise((done) => server.close(() => done())))
+
+  const html = await fetch(`${base}/bind/wall?n=3`).then((r) => r.text())
+
+  // 三格、三张码、三个独立 session、三个倒计时
+  assert.equal((html.match(/class="cell"/g) ?? []).length, 3, "应有 3 个格子")
+  assert.equal((html.match(/data:image\/png;base64,/g) ?? []).length, 3, "每格一张码")
+  const sessions = [...html.matchAll(/"session":"([^"]+)"/g)].map((m) => m[1])
+  assert.equal(new Set(sessions).size, 3, "每格必须是不同的会话")
+  assert.equal((html.match(/id="left-\d+"/g) ?? []).length, 3, "每格一个倒计时")
+  assert.match(html, /必须用微信「扫一扫」直接扫/)
+  assert.ok(html.includes("#1") && html.includes("#2") && html.includes("#3"))
+
+  // 三个号都真的被占住了（别的页面再要不走）
+  assert.deepEqual(await fetch(`${base}/bind/api/occupancy`).then((r) => r.json()), { ok: true, sessions: 3, locks: 3, reserved: 0 })
+
+  // 第一格绑定成功 → 只有它变「已绑定」
+  platform.bound.add("tok-a")
+  const first = await fetch(`${base}/bind/api/check?session=${sessions[0]}`).then((r) => r.json())
+  assert.equal(first.status, "bound")
+  const second = await fetch(`${base}/bind/api/check?session=${sessions[1]}`).then((r) => r.json())
+  assert.equal(second.status, "pending", "其它格子不受影响")
+})
+
+test("B11b /bind/wall 没号时给友好页，不是 500", async (t) => {
+  const platform = fakeFetch()
+  const dir = tempDir(t)
+  upsertAccount(dir, { llmToken: "sk-a", token: "tok-a", uid: "u1" })
+  const server = createBindServer({
+    configDir: dir,
+    platformBaseUrl: PLATFORM,
+    fetchImpl: platform.fetchImpl,
+    wallWindowMs: 0,
+    allocateWindowMs: 0,
+    checkWindowMs: 0,
+    log: { warn() {} },
+  })
+  await new Promise((done) => server.listen(0, "127.0.0.1", done))
+  const base = `http://127.0.0.1:${server.address().port}`
+  t.after(() => new Promise((done) => server.close(() => done())))
+
+  // 第一次拿光唯一的号，第二次再来就没号了
+  await fetch(`${base}/bind/wall?n=6`)
+  const again = await fetch(`${base}/bind/wall?n=6`)
+  assert.equal(again.status, 200)
+  assert.match(await again.text(), /暂时没有空位|待绑定/)
+})
+
+test("B6 会话过期后先续码、续满才 expired（不是一直 pending）", async (t) => {
   let clock = 1_700_000_000_000
   const platform = fakeFetch()
   const server = createBindServer({

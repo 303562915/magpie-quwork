@@ -56,14 +56,7 @@ export const BIND_PATHS = Object.freeze({
   authorizeUrl: "/api/oauth/wechat/url",
 })
 
-/**
- * 一次分配最多试几个账号。
- *
- * 为什么是 8：每次尝试要打两次上游（实测 + 取授权地址）。被占位的号会先被
- * `candidates()` 过滤掉，不会走到这里；真正会进循环的是「快照说没绑、实测已绑」
- * 或「上游读不到」的号 —— 8 个足够覆盖一轮，又不至于在坏池子上打十几分钟。
- */
-const MAX_PICK_ATTEMPTS = 8
+const MAX_PICK_ATTEMPTS = 8 // 一次分配最多试几个账号：每次尝试打两次上游，8 个够覆盖一轮坏号
 
 /** 单个账号自己上传的并发上限（门户刷新池子时用）。 */
 const DEFAULT_CONCURRENCY = 3
