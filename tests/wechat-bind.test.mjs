@@ -602,6 +602,69 @@ test("§22b 非法窗口值不能把节流静默关掉", async (t) => {
   assert.match(second, /操作太快了/, "NaN 窗口要回落成默认 3s，而不是 0")
 })
 
+// ── ㉔ 面板里能改固定码的公网地址（不用重启 magpie）────────────────────────
+//
+// 环境变量改了要重启 magpie 才生效，而 magpie 一停所有模型请求全断。
+// 所以固定码里的地址必须能在面板里改。
+
+test("§24 设置里填 bindPublicUrl → 固定码内容立刻跟着变；清空则回落到请求地址", async (t) => {
+  const { base } = await startServer(t)
+
+  // ① 先看默认：没配 → 用请求头拼出来的本机地址
+  const before = await fetch(`${base}/bind/qr.png`)
+  assert.match(before.headers.get("x-qr-target"), /^http:\/\/127\.0\.0\.1:\d+\/bind\/go$/)
+
+  // ② 存一个带尾斜杠 + 大写的地址：要被规范化
+  const saved = await fetch(`${base}/api/settings`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ bindPublicUrl: "https://Bind.Example.com/" }),
+  }).then((r) => r.json())
+  assert.equal(saved.ok, true)
+  assert.equal(saved.settings.bindPublicUrl, "https://bind.example.com")
+
+  const after = await fetch(`${base}/bind/qr.png`)
+  assert.equal(after.headers.get("x-qr-target"), "https://bind.example.com/bind/go")
+  const readBack = await fetch(`${base}/api/settings`).then((r) => r.json())
+  assert.equal(readBack.settings.bindPublicUrl, "https://bind.example.com")
+
+  // ③ 非法值 = 清空（不能把垃圾拼进固定码）
+  const bad = await fetch(`${base}/api/settings`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ bindPublicUrl: "javascript:alert(1)" }),
+  }).then((r) => r.json())
+  assert.equal(bad.settings.bindPublicUrl, "")
+  const cleared = await fetch(`${base}/bind/qr.png`)
+  assert.match(cleared.headers.get("x-qr-target"), /^http:\/\/127\.0\.0\.1:\d+\/bind\/go$/)
+})
+
+test("§25 normalizePublicUrl：只认 http(s)，去尾斜杠，拦垃圾", async () => {
+  const { normalizePublicUrl } = await import("../server.mjs")
+  assert.equal(normalizePublicUrl("https://a.example"), "https://a.example")
+  assert.equal(normalizePublicUrl("  https://a.example/  "), "https://a.example")
+  assert.equal(normalizePublicUrl("https://a.example/sub/"), "https://a.example/sub")
+  assert.equal(normalizePublicUrl(""), "")
+  assert.equal(normalizePublicUrl(null), "")
+  assert.equal(normalizePublicUrl("not a url"), "")
+  assert.equal(normalizePublicUrl("ftp://a.example"), "")
+  assert.equal(normalizePublicUrl("javascript:alert(1)"), "")
+})
+
+test("§26 /bind/qr.png?scale=16 出的是打印用大图（IHDR 尺寸更大）", async (t) => {
+  const { base } = await startServer(t)
+  const small = Buffer.from(await (await fetch(`${base}/bind/qr.png?scale=4`)).arrayBuffer())
+  const big = Buffer.from(await (await fetch(`${base}/bind/qr.png?scale=16`)).arrayBuffer())
+
+  // PNG: 8 字节签名 + 4 长度 + 4 类型("IHDR") + 4 宽 + 4 高
+  const width = (buf) => buf.readUInt32BE(16)
+  assert.ok(width(big) > width(small), `大图应更宽：${width(big)} vs ${width(small)}`)
+  assert.ok(big.length > small.length * 4, "打印图字节数应明显更大")
+})
+//
+// 面板整体是 `Access-Control-Allow-Origin: *`（file: 加载必须），但管理接口一旦也通配，
+// 任何一条公网网页都能在本机浏览器里把池子读走、把 sync 打满。
+
 // ── ㉓ 管理接口不能对任意站点开放 CORS ─────────────────────────────────────
 //
 // 面板整体是 `Access-Control-Allow-Origin: *`（file: 加载必须），但管理接口一旦也通配，

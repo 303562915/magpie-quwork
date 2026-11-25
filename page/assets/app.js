@@ -891,9 +891,44 @@ async function loadBindPool() {
   } catch (e) {
     $("bind-body").innerHTML = `<tr><td colspan="5"><div class="empty bad">读取失败：${esc(String(e?.message ?? e))}</div></td></tr>`
   }
+  // 公网地址与固定码：顺手带上（都是只读本地文件）
+  try {
+    const s = await api("/api/settings")
+    $("bind-public").value = String(s?.settings?.bindPublicUrl ?? "")
+  } catch {
+    /* 设置读不到不影响看池子 */
+  }
+  void refreshBindQr()
+}
+
+/**
+ * 刷新固定码图片，并把**图片里真正编码的那条 URL**显示出来（读响应的 `x-qr-target`）。
+ *
+ * 为什么要读响应头：固定码的内容由「环境变量 / 面板设置 / 请求头」三级决定，
+ * 页面上猜不出来；只有服务端自己知道最终拼成了什么。
+ */
+async function refreshBindQr() {
+  const bust = `${BASE}/bind/qr.png?scale=8&t=${Date.now()}`
+  const target = await fetch(bust, { method: "HEAD" })
+    .then((r) => r.headers.get("x-qr-target"))
+    .catch(() => null)
+  $("bind-qr").src = bust
+  if (target) $("bind-target").textContent = target
+  const big = $("bind-print")
+  if (big) big.href = `${BASE}/bind/qr.png?scale=16&t=${Date.now()}`
 }
 
 on($("bind-refresh"), loadBindPool)
+
+on($("bind-save-public"), async () => {
+  const v = String($("bind-public").value ?? "").trim()
+  const d = await api("/api/settings", { bindPublicUrl: v })
+  const saved = String(d?.settings?.bindPublicUrl ?? "")
+  $("bind-public").value = saved
+  $("bind-public-note").textContent = saved ? "已保存，二维码已刷新" : "已清空（改用当前面板地址）"
+  await refreshBindQr()
+  toast(saved ? `固定码已指向 ${saved}` : "已清空公网地址")
+})
 
 on($("bind-sync"), async () => {
   $("bind-note").textContent = "正在逐个读取账号状态…"

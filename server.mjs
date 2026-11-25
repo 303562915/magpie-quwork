@@ -50,6 +50,14 @@ export const DEFAULT_SETTINGS = Object.freeze({
   autoRefresh: false,
   accountsConcurrency: 2,
   recordsPages: 3,
+  /**
+   * 微信绑定门户里**固定二维码**要写进的公网地址（形如 `https://bind.example.com`）。
+   *
+   * 为什么要能在面板里改：`QUWORK_BIND_PUBLIC_URL` 是进程环境变量，改了必须重启 magpie
+   * 才生效（而 magpie 一停，所有模型请求全断）。放进设置文件就没有这个代价。
+   * 优先级：环境变量 > 这个设置 > 请求头（`x-forwarded-*` → `Host`）。
+   */
+  bindPublicUrl: "",
 })
 
 /** 读一个 JSON 文件（不存在/损坏 → null，不抛）。 */
@@ -362,6 +370,22 @@ export function createPageServer(opts = {}) {
   /** 面板自己的 JSON 文件（都在 magpie 配置目录里）。 */
   const settingsFile = () => join(configDir, "quwork-panel-settings.json")
   const accountsCacheFile = () => join(configDir, "quwork-accounts-cache.json")
+
+  /**
+   * 固定二维码里要写死的公网地址（不含路径前缀；前缀由调用方拼）。
+   *
+   * 优先级：`QUWORK_BIND_PUBLIC_URL`（或 options.publicBaseUrl） > 面板设置里的 `bindPublicUrl`
+   *        > 请求头（`x-forwarded-proto/host` → `Host`）。
+   *
+   * 中间这一层是为了「不改环境变量、不重启 magpie 也能换域名」—— 面板里填一下就生效。
+   *
+   * @param {import("node:http").IncomingMessage} req
+   * @returns {string}
+   */
+  const bindFixedBase = (req) =>
+    normalizePublicUrl(bindPublicBaseUrl) ||
+    normalizePublicUrl(readJsonFile(settingsFile())?.bindPublicUrl) ||
+    requestOrigin(req, "")
   const inviteCacheFile = () => join(configDir, "quwork-invite-cache.json")
   const rewardCacheFile = () => join(configDir, "quwork-reward-cache.json")
 
@@ -665,6 +689,8 @@ export function createPageServer(opts = {}) {
       for (const k of Object.keys(DEFAULT_SETTINGS)) {
         if (input && Object.prototype.hasOwnProperty.call(input, k)) next[k] = input[k]
       }
+      // 公网地址要清洗：空 = 用请求头；非 http(s) 一律当没填（别让固定码里出现奇怪的东西）
+      next.bindPublicUrl = normalizePublicUrl(next.bindPublicUrl)
       writeJsonFile(settingsFile(), next)
       return { ok: true, settings: next, path: settingsFile() }
     },
@@ -1013,11 +1039,14 @@ export function createPageServer(opts = {}) {
         }
 
         if (isGet && rest === "/qr.png") {
-          // 固定二维码：内容就是「本服务公网地址 + /bind/go」，与图案一一对应、永不变化
-          const target = `${requestOrigin(req, bindPublicBaseUrl)}${mount}/bind/go`
+          // 固定二维码：内容就是「本服务公网地址 + /bind/go」，与图案一一对应、永不变化。
+          //
+          // `?scale=` 给「打印用」留口子：`/bind/qr.png?scale=16` 出来的是 1024px 级别的图。
+          const target = `${bindFixedBase(req)}${mount}/bind/go`
+          const scale = Math.max(4, Math.min(20, Number(url.searchParams.get("scale")) || 8))
           let buf
           try {
-            buf = qrPng(target, { ecl: "L", scale: 8, border: 4 })
+            buf = qrPng(target, { ecl: "L", scale, border: 4 })
           } catch (e) {
             // 这是一张 <img>：出错也得给一张图，否则页面上只看到裂图、看不到原因
             log?.warn?.(`quwork bind: 固定码生成失败: ${String(e?.message ?? e).slice(0, 120)}`)
@@ -1026,7 +1055,7 @@ export function createPageServer(opts = {}) {
           res.writeHead(200, {
             ...corsHeaders(pna),
             "content-type": "image/png",
-            // no-store：运维改了 QUWORK_BIND_PUBLIC_URL 就要立刻能拿到新图
+            // no-store：运维改了公网地址就要立刻能拿到新图
             "cache-control": "no-store",
             "content-length": String(buf.length),
             "x-qr-target": target,
@@ -1190,6 +1219,27 @@ function sendHtml(res, html, opts = {}) {
     "content-length": String(buf.length),
   })
   res.end(opts.head ? undefined : buf)
+}
+
+/**
+ * 规范化「固定码里的公网地址」。
+ *
+ * 只认 `http(s)://host[/path]`；空串 / 非法值一律返回空串（表示「用请求头兜底」）。
+ * 去掉末尾斜杠，避免拼出 `https://x//bind/go`。
+ *
+ * @param {any} v
+ * @returns {string}
+ */
+export function normalizePublicUrl(v) {
+  const s = String(v ?? "").trim()
+  if (!s) return ""
+  try {
+    const u = new URL(s)
+    if (u.protocol !== "http:" && u.protocol !== "https:") return ""
+    return `${u.origin}${u.pathname.replace(/\/+$/, "")}`
+  } catch {
+    return ""
+  }
 }
 
 /**

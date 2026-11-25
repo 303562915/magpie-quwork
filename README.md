@@ -436,13 +436,34 @@ curl -s http://127.0.0.1:4392/任意路径 | head -c 60   # SPA 兜底：回面�
 > 后果：**配了 token 又走反代时，面板里的「扫码绑定」tab 读不到池子**（它不会带 token）。
 > 看池子请直连本机端口，或临时清掉 `QUWORK_BIND_ADMIN_TOKEN`。
 
+### 公网地址怎么配（**不用重启 magpie**）
+
+优先级：环境变量 `QUWORK_BIND_PUBLIC_URL` > 面板设置里的 `bindPublicUrl` > 请求头。
+
+面板「扫码绑定」tab 里有输入框：填 `https://你的域名` → 点「保存并刷新二维码」，固定码立刻指向新地址。
+值存在 `quwork-panel-settings.json`（只接受 http/https，非法值会被清空而不是拼进二维码）。
+
+> 为什么要有这一层：环境变量是进程级的，改了必须重启 magpie 才生效 —— 而 magpie 一停，
+> 所有模型请求全断（见 AGENTS.md §0）。所以日常改域名请用面板里的输入框。
+
+### 印发固定码
+
+```bash
+npm run bind-qr -- https://bind.example.com            # → ./fixed-qr.png + ./fixed-qr.print.html
+npm run bind-qr -- https://bind.example.com ./out/qr.png
+```
+
+出两张东西：`png`（1024px 级，scale=16）和 A4 打印页（二维码 + 一句引导语）。
+二维码内容永远是 `<公网地址>/bind/go`，**图案不随池子变化** —— 印一次可以发一辈子。
+面板里也有现成的：`/bind/qr.png?scale=16`。
+
 ### 两个环境变量
 
 ```bash
-# 印在固定码里的公网地址（不设就用请求头拼，反代后容易拼出内网地址）
+# 印在固定码里的公网地址（不设就用面板设置 → 请求头；环境变量优先级最高）
 QUWORK_BIND_PUBLIC_URL=https://bind.example.com
 
-# 管理接口 token（不设 = 只允许 127.0.0.1 访问 /bind/api/pool 与 /bind/api/sync）
+# 管理接口 token（不设 = 只允许 127.0.0.1 直连访问 /bind/api/pool 与 /bind/api/sync）
 QUWORK_BIND_ADMIN_TOKEN=<随机串>
 ```
 
@@ -487,7 +508,7 @@ location /bind {
 
 ```bash
 cd D:\project_GIT\magpie-plugins\magpie-quwork
-node --test            # 全绿（当前 262 条）
+node --test            # 全绿（当前 265 条）
 node -e "import('./index.mjs').then(m=>console.log(Object.keys(m)))"
 # → [ 'QuWorkAuthPlugin', '_internal' ]
 ```
@@ -513,7 +534,7 @@ src/refresh.mjs            续期（2h 兜底 / <1h 触发 / 60s 节流）
 src/wechat-bind.mjs        绑定门户：账号池快照 / 占位锁 / 会话 / 平台签发 state
 src/bind-pages.mjs         门户 HTML（落地页 / 出码页 / 没号页 / 出错页，手机优先）
 src/qr.mjs                 零依赖二维码编码器（字节模式，版本 1~10，ECC L/M/Q/H）+ PNG
-tests/*.test.mjs           262 条
+tests/*.test.mjs           265 条
 ```
 
 ## 9. 出处
