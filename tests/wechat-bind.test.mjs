@@ -654,22 +654,22 @@ test("§22b 非法窗口值不能把节流静默关掉", async (t) => {
   assert.match(second, /操作太快了/, "NaN 窗口要回落成默认 3s，而不是 0")
 })
 
-test("§28 占位 1 分半（90s）+ 页面会自续码（过期不逼用户重扫固定码）", async (t) => {
+test("§28 占位 3 分钟 + 页面会自续码（过期不逼用户重扫固定码）", async (t) => {
   const { SESSION_TTL_MS } = await import("../src/wechat-bind.mjs")
-  assert.equal(SESSION_TTL_MS, 90_000, "默认占位时间应是 90 秒")
+  assert.equal(SESSION_TTL_MS, 180_000, "默认占位时间应是 3 分钟")
 
   const { base } = await startServer(t)
   const go = await fetch(`${base}/bind/go`).then((r) => r.text())
   // 页面把 ttl 写进倒计时，并且**过期后原地换码**（服务端下一轮会回新的 qr）
-  assert.match(go, /var deadline = Date\.now\(\) \+ \(Number\(90000\)/, "倒计时要按 90s 来")
+  assert.match(go, /var deadline = Date\.now\(\) \+ \(Number\(180000\)/, "倒计时要按 180s 来")
   assert.match(go, /if \(j\.qr\) \{/, "页面要能接收并替换新码")
   assert.match(go, /var hardStop = Date\.now\(\) \+ maxWait;/, "要有总等待上限，别无限轮询")
 
-  // 服务端也要按 90s 判过期
+  // 服务端也要按 180s 判过期
   const body = await fetch(`${base}/bind/go`).then((r) => r.text())
   const session = (body.match(/var sid = "([^"]+)"/) ?? [])[1]
   const st = await fetch(`${base}/bind/api/check?session=${session}`).then((r) => r.json())
-  assert.ok(st.remainingMs <= 90_000 && st.remainingMs > 80_000, `剩余时间应 ≈90s，实际 ${st.remainingMs}`)
+  assert.ok(st.remainingMs <= 180_000 && st.remainingMs > 170_000, `剩余时间应 ≈180s，实际 ${st.remainingMs}`)
 })
 
 // ── ㉚ 过期续码：同一个号、新 state、页面不用重扫固定码 ──────────────────────

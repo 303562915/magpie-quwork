@@ -243,7 +243,7 @@ test("B6 会话过期后 check 返回 expired（不是一直 pending）", async 
   assert.equal((await fetch(`${base}/bind/api/check?session=${session}`).then((r) => r.json())).status, "pending")
 
   // 占位过期 → 先原地续码（页面不用重扫固定码），续满次数才真作废
-  clock += 2 * 60 * 1000
+  clock += 4 * 60 * 1000 // > 3 分钟占位
   let renewed = await fetch(`${base}/bind/api/check?session=${session}`).then((r) => r.json())
   assert.equal(renewed.status, "pending")
   assert.equal(renewed.renewed, true)
@@ -252,7 +252,7 @@ test("B6 会话过期后 check 返回 expired（不是一直 pending）", async 
   // 一次只续一张：把剩余续码次数逐个用掉（默认 6 次：上面用 1，还剩 5）
   let last = renewed
   for (let i = 0; i < 6 && last.status === "pending"; i += 1) {
-    clock += 2 * 60 * 1000
+    clock += 4 * 60 * 1000
     last = await fetch(`${base}/bind/api/check?session=${session}`).then((r) => r.json())
   }
   assert.equal(last.status, "expired", "续满次数后必须真的作废，不能一直 pending")
