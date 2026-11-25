@@ -242,6 +242,18 @@ test("B6 会话过期后 check 返回 expired（不是一直 pending）", async 
   const session = (html.match(/var sid = "([^"]+)"/) ?? [])[1]
   assert.equal((await fetch(`${base}/bind/api/check?session=${session}`).then((r) => r.json())).status, "pending")
 
-  clock += 10 * 60 * 1000
-  assert.equal((await fetch(`${base}/bind/api/check?session=${session}`).then((r) => r.json())).status, "expired")
+  // 占位过期 → 先原地续码（页面不用重扫固定码），续满次数才真作废
+  clock += 2 * 60 * 1000
+  let renewed = await fetch(`${base}/bind/api/check?session=${session}`).then((r) => r.json())
+  assert.equal(renewed.status, "pending")
+  assert.equal(renewed.renewed, true)
+  assert.ok(String(renewed.qr ?? "").startsWith("data:image/png;base64,"), "续码要带一张可直接替换的图")
+
+  // 一次只续一张：把剩余续码次数逐个用掉（默认 6 次：上面用 1，还剩 5）
+  let last = renewed
+  for (let i = 0; i < 6 && last.status === "pending"; i += 1) {
+    clock += 2 * 60 * 1000
+    last = await fetch(`${base}/bind/api/check?session=${session}`).then((r) => r.json())
+  }
+  assert.equal(last.status, "expired", "续满次数后必须真的作废，不能一直 pending")
 })

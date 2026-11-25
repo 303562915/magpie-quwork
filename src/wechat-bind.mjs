@@ -35,6 +35,7 @@ import { randomUUID } from "node:crypto"
 import { PLATFORM_BASE_URL, PLATFORM_TIMEOUT_MS } from "./constants.mjs"
 import { callPlatform } from "./invite.mjs"
 import { readAll } from "./auth-store.mjs"
+import { qrPng } from "./qr.mjs"
 
 /** 账号池落盘文件名（与面板其它缓存同级）。 */
 export const BIND_POOL_FILE = "quwork-bind-pool.json"
@@ -55,8 +56,14 @@ export const BIND_PATHS = Object.freeze({
   authorizeUrl: "/api/oauth/wechat/url",
 })
 
-/** 一次分配最多试几个账号（前面几个 token 失效时别把整池扫一遍）。 */
-const MAX_PICK_ATTEMPTS = 3
+/**
+ * 一次分配最多试几个账号。
+ *
+ * 为什么是 8：每次尝试要打两次上游（实测 + 取授权地址）。被占位的号会先被
+ * `candidates()` 过滤掉，不会走到这里；真正会进循环的是「快照说没绑、实测已绑」
+ * 或「上游读不到」的号 —— 8 个足够覆盖一轮，又不至于在坏池子上打十几分钟。
+ */
+const MAX_PICK_ATTEMPTS = 8
 
 /** 单个账号自己上传的并发上限（门户刷新池子时用）。 */
 const DEFAULT_CONCURRENCY = 3
@@ -344,7 +351,11 @@ export function reserveWindowMs() {
  *
  * @param {{configDir: string, platformBaseUrl?: string, fetchImpl?: typeof fetch,
  *   now?: () => number, sessionTtlMs?: number, poolTtlMs?: number,
- *   adminToken?: string, maxSessions?: number}} opts
+ *   adminToken?: string, maxSessions?: number, maxRenewals?: number,
+ *   qrPngImpl?: (text: string, opts?: any) => Buffer}} opts
+ *   `maxRenewals`：同一个会话最多自动续几次码（默认 6 ≈ 9 分钟）。
+ *   续码后页面上那张「专属二维码」会**原地换新**，用户不需要重扫固定码。
+ *   `qrPngImpl`：续码时要现画一张 PNG（默认用本仓库的编码器；测试可注入假实现）。
  */
 export function createBindPortal(opts) {
   const configDir = String(opts?.configDir ?? "").trim()
@@ -354,6 +365,9 @@ export function createBindPortal(opts) {
   const sessionTtlMs = Number(opts?.sessionTtlMs) > 0 ? Number(opts.sessionTtlMs) : SESSION_TTL_MS
   const poolTtlMs = Number(opts?.poolTtlMs) > 0 ? Number(opts.poolTtlMs) : POOL_TTL_MS
   const maxSessions = Number(opts?.maxSessions) > 0 ? Number(opts.maxSessions) : 500
+  const maxRenewals = Number.isInteger(opts?.maxRenewals) && opts.maxRenewals >= 0 ? opts.maxRenewals : 6
+  /** 续码时现画二维码（注入点：测试给假实现，生产用默认编码器）。 */
+  const qrPngImpl = opts?.qrPngImpl === null ? null : (typeof opts?.qrPngImpl === "function" ? opts.qrPngImpl : qrPng)
   const adminToken = String(opts?.adminToken ?? "").trim()
 
   /** sessionId → 会话 */
@@ -382,20 +396,19 @@ export function createBindPortal(opts) {
     return s
   }
 
-  /** 清掉过期会话（表很小，全扫一遍即可）。 */
+  /**
+   * 清掉过期会话（表很小，全扫一遍即可）。
+   *
+   * ⚠ **这里不能把 pending 会话标成 expired**：过期只是「这张码不能再用」，
+   *   会话本身还能原地续一张新码（见 `check()`）。真正的作废只发生在：
+   *   续码次数用完、或号已经被绑掉 —— 两处都在 `check()` 里显式落 `expired`。
+   */
   const sweep = () => {
     const t = now()
     for (const [k, until] of [...reserved.entries()]) if (t > until) reserved.delete(k)
     for (const s of [...sessions.values()]) {
-      if (s.status !== "pending") {
-        // bound 的会话保留一小会儿，方便前端最后一次轮询读到结果
-        if (t - (s.settledAt ?? s.issuedAt) > 60_000) dropSession(s.sessionId)
-        continue
-      }
-      if (t > s.expiresAt) {
-        s.status = "expired"
-        s.settledAt = t
-        if (locks.get(s.key) === s.sessionId) locks.delete(s.key)
+      if (s.status !== "pending" && t - (s.settledAt ?? s.issuedAt) > 60_000) {
+        dropSession(s.sessionId) // bound / expired 的会话留 60 秒供前端读最后一眼
       }
     }
     // 极端情况下（有人狂刷 /go）也别让内存无限涨。
@@ -621,11 +634,21 @@ export function createBindPortal(opts) {
      *
      * 判据只有一个：`GET /api/user/self` 的 `wechat_bound`（扫码的人不需要做任何事）。
      *
+     * # 过期不废会话：**原地续码**
+     *
+     * 占位只有 1 分半（防扫描器白占号），但真人扫完固定码、读提示、再找第二台设备来扫，
+     * 很容易超过。所以会话过期后不直接作废，而是：
+     *
+     *	① 这个号**还没绑** → 用它的 token 重新签发一条授权 URL（新 state），
+     *	   回 `pending` + `qr`（base64 PNG）+ `ttlMs`，页面**原地换图**，用户不用重扫固定码；
+     *	② 已经绑了 → 直接回 `bound`；
+     *	③ 连续续码到 `maxRenewals` 次就真的作废（防止一个僵尸页面永远占着号）。
+     *
      * ⚠ 返回体**不带账号 key**：这个接口对陌生人开放，只给编号 `#3`。
      *
      * @param {string} sessionId
-     * @returns {Promise<{status: "pending"|"bound"|"expired", label?: string,
-     *   remainingMs?: number, message?: string}>}
+     * @returns {Promise<{status: "pending"|"bound"|"expired", label?: string, key?: string,
+     *   remainingMs?: number, message?: string, qr?: string, qrUrl?: string, ttlMs?: number, renewed?: boolean}>}
      */
     async check(sessionId) {
       sweep()
@@ -634,16 +657,68 @@ export function createBindPortal(opts) {
 
       const entries = listPoolTokens(configDir)
       const label = labelOf(entries.map((a) => a.key), s.key)
+      const token = String(entries.find((a) => a.key === s.key)?.token ?? "").trim()
 
       if (s.status === "bound") return { status: "bound", label }
-      if (s.status === "expired" || now() > s.expiresAt) {
-        s.status = "expired"
-        s.settledAt = now()
-        if (locks.get(s.key) === s.sessionId) locks.delete(s.key)
-        return { status: "expired", message: "二维码已过期，请重新扫码" }
+      if (s.status === "expired") return { status: "expired", message: "这次的码已失效，请重新扫码" }
+
+      const expired = now() > s.expiresAt
+
+      // ① 过期了：先实测一次，还能不能救
+      if (expired) {
+        if (!token) return { status: "expired", message: "这个账号没有平台 token" }
+        const self = await fetchSelf({ platformBaseUrl, token, fetchImpl })
+        if (self.ok && self.wechatBound) {
+          s.status = "bound"
+          s.settledAt = now()
+          if (locks.get(s.key) === s.sessionId) locks.delete(s.key)
+          markBound(s.key, { wechatId: self.wechatId })
+          return { status: "bound", label }
+        }
+
+        const renewals = Number(s.renewals ?? 0)
+        if (renewals >= maxRenewals) {
+          s.status = "expired"
+          s.settledAt = now()
+          if (locks.get(s.key) === s.sessionId) locks.delete(s.key)
+          return { status: "expired", message: `续了 ${renewals} 次码都没人扫，请重新开始` }
+        }
+
+        const got = await fetchAuthorizeUrl({ platformBaseUrl, token, fetchImpl })
+        if (!got.ok || !got.state) {
+          // 续码失败：这次先不判死，等下一轮再试
+          return {
+            status: "pending",
+            remainingMs: 0,
+            message: `平台暂时取不到新码（${got.message ?? "未知"}）`,
+          }
+        }
+
+        s.state = got.state
+        s.authorizeUrl = String(got.url)
+        s.renewals = renewals + 1
+        s.issuedAt = now()
+        s.expiresAt = now() + sessionTtlMs
+        locks.set(s.key, s.sessionId)
+        if (qrPngImpl) {
+          try {
+            s.lastQr = `data:image/png;base64,${qrPngImpl(s.authorizeUrl, { ecl: "L", scale: 8, border: 4 }).toString("base64")}`
+          } catch {
+            s.lastQr = undefined
+          }
+        }
+        return {
+          status: "pending",
+          label,
+          key: s.key,
+          renewed: true,
+          qr: s.lastQr,
+          qrUrl: s.authorizeUrl,
+          ttlMs: sessionTtlMs,
+          remainingMs: sessionTtlMs,
+        }
       }
 
-      const token = String(entries.find((a) => a.key === s.key)?.token ?? "").trim()
       if (!token) return { status: "pending", remainingMs: Math.max(0, s.expiresAt - now()), message: "没有平台 token" }
 
       const self = await fetchSelf({ platformBaseUrl, token, fetchImpl })

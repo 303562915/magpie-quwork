@@ -237,7 +237,7 @@ test("§6 全部账号都绑完 → 「没有可绑定账号」页（200）", as
 
 // ── ⑦ 会话过期 ─────────────────────────────────────────────────────────
 
-test("§7 会话过期 → check 返回 expired", async (t) => {
+test("§7 会话过期 → 先续码；续满次数才 expired；号回到池子", async (t) => {
   let clock = 1_700_000_000_000
   const platform = fakePlatform()
   const dir = seed(t)
@@ -247,6 +247,7 @@ test("§7 会话过期 → check 返回 expired", async (t) => {
     fetchImpl: platform.fetchImpl,
     now: () => clock,
     sessionTtlMs: 1000,
+    maxRenewals: 1,
   })
   await portal.sync()
 
@@ -254,9 +255,15 @@ test("§7 会话过期 → check 返回 expired", async (t) => {
   assert.equal(alloc.ok, true)
   assert.equal((await portal.check(alloc.sessionId)).status, "pending")
 
+  // 过期第 1 次：续一张新码（不是直接作废，用户不用重扫固定码）
+  clock += 5000
+  const renewed = await portal.check(alloc.sessionId)
+  assert.equal(renewed.status, "pending")
+  assert.equal(renewed.renewed, true)
+
+  // 再过期：续码次数用完 → 真的作废，号回到池子
   clock += 5000
   assert.equal((await portal.check(alloc.sessionId)).status, "expired")
-  // 过期后账号回到池子
   const again = await portal.allocate()
   assert.equal(again.ok, true)
   assert.equal(again.key, alloc.key)
@@ -647,22 +654,65 @@ test("§22b 非法窗口值不能把节流静默关掉", async (t) => {
   assert.match(second, /操作太快了/, "NaN 窗口要回落成默认 3s，而不是 0")
 })
 
-test("§28 会话默认有效期 1 分半（90s），页面倒计时与轮询次数跟着对齐", async (t) => {
+test("§28 占位 1 分半（90s）+ 页面会自续码（过期不逼用户重扫固定码）", async (t) => {
   const { SESSION_TTL_MS } = await import("../src/wechat-bind.mjs")
   assert.equal(SESSION_TTL_MS, 90_000, "默认占位时间应是 90 秒")
 
   const { base } = await startServer(t)
   const go = await fetch(`${base}/bind/go`).then((r) => r.text())
-  // 页面把 ttl 直接写进倒计时（`Date.now() + ttlMs`）
-  assert.match(go, /var deadline = Date\.now\(\) \+ 90000;/, "倒计时要按 90s 来")
-  // 每 3 秒一轮，1 分半 = 30 轮，留一点余量
-  assert.match(go, /if \(tries > 45\)/, "轮询上限要跟着缩短")
+  // 页面把 ttl 写进倒计时，并且**过期后原地换码**（服务端下一轮会回新的 qr）
+  assert.match(go, /var deadline = Date\.now\(\) \+ \(Number\(90000\)/, "倒计时要按 90s 来")
+  assert.match(go, /if \(j\.qr\) \{/, "页面要能接收并替换新码")
+  assert.match(go, /var hardStop = Date\.now\(\) \+ maxWait;/, "要有总等待上限，别无限轮询")
 
   // 服务端也要按 90s 判过期
   const body = await fetch(`${base}/bind/go`).then((r) => r.text())
   const session = (body.match(/var sid = "([^"]+)"/) ?? [])[1]
   const st = await fetch(`${base}/bind/api/check?session=${session}`).then((r) => r.json())
   assert.ok(st.remainingMs <= 90_000 && st.remainingMs > 80_000, `剩余时间应 ≈90s，实际 ${st.remainingMs}`)
+})
+
+// ── ㉚ 过期续码：同一个号、新 state、页面不用重扫固定码 ──────────────────────
+
+test("§30 会话过期后 check 会原地续码（pending + qr + ttlMs），号不变", async (t) => {
+  let clock = 1_700_000_000_000
+  const platform = fakePlatform()
+  const dir = seed(t)
+  const portal = createBindPortal({
+    configDir: dir,
+    platformBaseUrl: PLATFORM,
+    fetchImpl: platform.fetchImpl,
+    now: () => clock,
+    sessionTtlMs: 1000,
+    maxRenewals: 2,
+  })
+  await portal.sync()
+
+  const a = await portal.allocate()
+  assert.equal(a.ok, true)
+  const firstState = a.state
+
+  clock += 2000 // 过期
+  const r1 = await portal.check(a.sessionId)
+  assert.equal(r1.status, "pending", "过期不是抛弃，而是续一张新码")
+  assert.equal(r1.renewed, true)
+  assert.equal(r1.key, a.key, "还是同一个号")
+  assert.ok(r1.qr?.startsWith("data:image/png;base64,"), "要直接给页面一张可替换的图")
+  assert.ok(r1.ttlMs > 0)
+  const newState = new URL(r1.qrUrl).searchParams.get("state")
+  assert.ok(newState && newState !== firstState, "续码必须换新的平台 state")
+
+  // 号还归这一个会话（别人抢不到）
+  const other = await portal.allocate()
+  assert.notEqual(other.key, a.key)
+
+  // 续满 maxRenewals 次就真的作废
+  clock += 2000
+  assert.equal((await portal.check(a.sessionId)).renewed, true)
+  clock += 2000
+  const dead = await portal.check(a.sessionId)
+  assert.equal(dead.status, "expired")
+  assert.match(String(dead.message ?? ""), /续了 2 次/)
 })
 
 test("§27 出码页必须明确「用微信扫一扫直接扫，相册/长按识别无效」", async (t) => {

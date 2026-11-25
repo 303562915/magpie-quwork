@@ -143,13 +143,17 @@ export function landingPage(opts = {}) {
  * 出码页：这个账号专属的授权二维码 + 轮询。
  *
  * @param {{sessionId: string, label: string, qrDataUri: string, authorizeUrl: string,
- *   ttlMs: number, mount?: string}} opts
+ *   ttlMs: number, mount?: string, maxWaitMs?: number, pollMs?: number}} opts
+ *   `maxWaitMs`：页面**最长等多久**（默认 5 分钟）。它可以比占位 TTL 长 —— 占位到期后
+ *   服务端会重新给「同一个号」出一次码，我们只续期，不需要用户重新扫固定码。
+ *   `pollMs`：轮询间隔（默认 3 秒；测试会调小）。
  * @returns {string}
  */
 export function goPage(opts) {
-  const ttlSec = Math.max(0, Math.round((Number(opts.ttlMs) || 0) / 1000))
   const go = pathOf(opts.mount, "/bind/go")
   const checkUrl = pathOf(opts.mount, "/bind/api/check")
+  const pollMs = Math.max(1000, Number(opts.pollMs) || 3000)
+  const maxWaitMs = Math.max(90_000, Number(opts.maxWaitMs) || 5 * 60 * 1000)
   const body = `
 <div class="card">
   <span class="badge">待绑定账号 ${esc(opts.label)}</span>
@@ -161,10 +165,15 @@ export function goPage(opts) {
   </div>
   <p class="big">扫完在微信里点「<span class="ok">确认登录</span>」</p>
   <p class="hint">如果身边只有这一台手机：用<strong>电脑</strong>打开 <code>${esc(go)}</code>，再用手机微信扫电脑屏幕上的那张码。</p>
-  <p class="hint">剩余时间 <span class="timer" id="left">--:--</span>，超时请重新扫码。</p>
+  <p class="hint">剩余时间 <span class="timer" id="left">--:--</span>；<strong>过期会自动换一张新码</strong>，本页不用关。</p>
   <p class="hint" id="poll">正在等待确认…</p>
   <a class="btn" id="done" style="display:none" href="${esc(go)}">再帮我们绑一个</a>
-  <p class="hint" id="again" style="display:none">二维码已过期。<a href="${esc(go)}">点这里换一个</a></p>
+  <div id="live" style="display:none;margin-top:14px">
+    <p class="big" id="live-title">这张码换了新的一张，请再扫一次</p>
+    <img class="qr" id="live-qr" alt="新的微信扫码绑定二维码">
+    <p class="hint"><a id="live-link" href="#" target="_blank" rel="noreferrer">在微信里点这里打开新授权页</a></p>
+  </div>
+  <p class="hint" id="again" style="display:none">这次的码太久没人扫，已失效。<a href="${esc(go)}">点这里重新开始</a></p>
 </div>`
   // ⚠ sessionId 拼进内联脚本时必须把 `<` 转义掉（今天它只可能是 hex，但别赌来源）
   const sidJs = JSON.stringify(String(opts?.sessionId ?? "")).replace(/</g, "\\u003c")
@@ -172,20 +181,33 @@ export function goPage(opts) {
 (function () {
   var sid = ${sidJs};
   var checkUrl = ${JSON.stringify(checkUrl).replace(/</g, "\\u003c")};
-  var deadline = Date.now() + ${Math.max(0, Number(opts.ttlMs) || 0)};
+  var maxWait = ${maxWaitMs};
+  var interval = ${pollMs};
+  var deadline = Date.now() + (Number(${JSON.stringify(Number(opts.ttlMs) || 0)}) || 0);
+  var hardStop = Date.now() + maxWait;
   var left = document.getElementById("left");
   var poll = document.getElementById("poll");
   var qr = document.getElementById("qr");
+  function setTtl(ms) { if (ms > 0) deadline = Date.now() + ms; }
   function tick() {
     var s = Math.max(0, Math.round((deadline - Date.now()) / 1000));
     left.textContent = String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
   }
   tick();
   var timer = setInterval(tick, 1000);
-  var tries = 0;
+  /**
+   * 轮询。服务端可能回这几种：
+   *   bound        → 绑定成功，收工
+   *   pending      → 继续等；若带了新的 \`qr\`（码过期后服务端重新签发）就原地换图 + 重新计时
+   *   expired      → 占位太久没人扫，整个流程作废，给「重新开始」
+   */
   var loop = setInterval(function () {
-    tries += 1;
-    if (tries > 45) { clearInterval(loop); clearInterval(timer); return; }
+    if (Date.now() > hardStop) {
+      clearInterval(loop); clearInterval(timer);
+      poll.textContent = "等待超时";
+      document.getElementById("again").style.display = "block";
+      return;
+    }
     fetch(checkUrl + "?session=" + encodeURIComponent(sid), { cache: "no-store" })
       .then(function (r) { return r.json(); })
       .then(function (j) {
@@ -194,17 +216,30 @@ export function goPage(opts) {
           poll.innerHTML = '<span class="ok">绑定成功 ✓ 谢谢！</span>';
           qr.style.display = "none";
           document.getElementById("done").style.display = "block";
+          document.getElementById("live").style.display = "none";
         } else if (j.status === "expired") {
           clearInterval(loop); clearInterval(timer);
-          poll.textContent = "二维码已过期";
+          poll.textContent = "这次的码已经失效";
           qr.style.opacity = ".25";
+          document.getElementById("live").style.display = "none";
           document.getElementById("again").style.display = "block";
-        } else if (j.message) {
-          poll.textContent = "等待中…（" + j.message + "）";
+        } else {
+          if (j.qr) {
+            // 旧码已经作废：把新码放大显示（同一台手机也能看到，长按无效，需要用另一台设备扫）
+            document.getElementById("live-qr").src = j.qr;
+            if (j.qrUrl) document.getElementById("live-link").href = j.qrUrl;
+            document.getElementById("live").style.display = "block";
+            document.getElementById("live-title").textContent =
+              "号已确认是你的，这张新码有效 " + Math.round((j.ttlMs || 0) / 1000) + " 秒";
+            setTtl(j.ttlMs || 0);
+            poll.textContent = "已自动换新码，请用微信扫上面这张新的";
+          } else if (j.message) {
+            poll.textContent = "等待中…（" + j.message + "）";
+          }
         }
       })
       .catch(function () {});
-  }, 3000);
+  }, interval);
 })();
 `
   return layout({ title: `绑定账号 ${opts.label ?? ""}`, body, script })
