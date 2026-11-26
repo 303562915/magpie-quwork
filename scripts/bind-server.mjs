@@ -113,6 +113,9 @@ export function createBindServer(opts = {}) {
     return chain.length ? chain[chain.length - 1] : String(req?.socket?.remoteAddress ?? "")
   }
 
+  /** 这不是微信内置浏览器（几乎等于：扫码链路走不通，页面要把这层说清楚）。 */
+  const isNotWeChat = (req) => !/MicroMessenger/i.test(String(req?.headers?.["user-agent"] ?? ""))
+
   const sendHtml = (res, html, status = 200) => {
     const buf = Buffer.from(String(html ?? ""), "utf8")
     res.writeHead(status, {
@@ -168,7 +171,7 @@ export function createBindServer(opts = {}) {
 
       if (isGet && (rest === "" || rest === "/index.html")) {
         const ov = portal.overview()
-        return sendHtml(res, landingPage({ total: ov.total, available: ov.available, bound: ov.bound, mount }))
+        return sendHtml(res, landingPage({ total: ov.total, available: ov.available, bound: ov.bound, mount, notWeChat: isNotWeChat(req) }))
       }
 
       // 阵列页：一屏多个待绑定账号，每格一张专属码（群里发这个，谁扫哪格都行）
@@ -202,7 +205,8 @@ export function createBindServer(opts = {}) {
           wallPage({
             mount,
             cards,
-            remainNote: `池子里还有 ${Math.max(0, ov.available - cards.length)} 个没绑的号；没有空位就等 3 分钟再刷新。`,
+            remainNote: `池子里还有 ${Math.max(0, ov.available - cards.length)} 个没绑的号；没有空位就等 5 分钟再刷新。`,
+            notWeChat: isNotWeChat(req),
           }),
         )
       }
@@ -222,7 +226,7 @@ export function createBindServer(opts = {}) {
           log?.warn?.(`bind: 二维码生成失败: ${String(e?.message ?? e).slice(0, 120)}`)
           return sendHtml(res, errorPage("二维码生成失败", { mount }))
         }
-        return sendHtml(res, goPage({ sessionId: r.sessionId, label: r.label, qrDataUri, authorizeUrl: r.authorizeUrl, ttlMs: r.ttlMs, mount }))
+        return sendHtml(res, goPage({ sessionId: r.sessionId, label: r.label, qrDataUri, authorizeUrl: r.authorizeUrl, ttlMs: r.ttlMs, mount, notWeChat: isNotWeChat(req) }))
       }
 
       if (isGet && rest === "/qr.png") {
@@ -293,7 +297,9 @@ export function createBindServer(opts = {}) {
       // 手动释放所有占位（有人拿着码不确认、或要重新从 #1 开始分配时用）
       if (req.method === "POST" && rest === "/api/release") {
         if (!portal.authorize(req)) return sendJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" })
-        const r = portal.releaseAll()
+        // 默认只清「没人盯」的会话；?all=1 才连正在被扫的也清（会作废别人手上的码）
+        const idleMs = url.searchParams.get("all") === "1" ? 0 : 60_000
+        const r = portal.releaseAll({ idleMs })
         if (logFile) {
           try {
             appendFileSync(logFile, `${new Date().toISOString()} RELEASE 释放占位会话=${r.releasedSessions} 锁=${r.releasedLocks} 预留=${r.releasedReserved} ip=${ipOf(req)}\n`, "utf8")

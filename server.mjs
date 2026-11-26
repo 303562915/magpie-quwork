@@ -400,6 +400,17 @@ export function createPageServer(opts = {}) {
   const inviteCacheFile = () => join(configDir, "quwork-invite-cache.json")
   const rewardCacheFile = () => join(configDir, "quwork-reward-cache.json")
 
+  /**
+   * 这不是微信内置浏览器（UA 里没有 MicroMessenger）。
+   *
+   * 用途：门户页顶部直接告诉人「你现在不是用微信打开的，扫码链路走不通」——
+   * 否则真人会一直在浏览器里点、等，然后说「他扫了但没绑上」。
+   *
+   * @param {import("node:http").IncomingMessage} req
+   * @returns {boolean}
+   */
+  const isNotWeChat = (req) => !/MicroMessenger/i.test(String(req?.headers?.["user-agent"] ?? ""))
+
   // ── 多账号基础设施：所有平台操作都要「按 key 找账号 → 用它自己的 token」──
 
   /** `plugin-auth.json` 里所有 quwork 条的 key（顺序即文件顺序）。 */
@@ -1010,7 +1021,7 @@ export function createPageServer(opts = {}) {
           const ov = bindPortal.overview()
           return sendHtml(
             res,
-            landingPage({ total: ov.total, available: ov.available, bound: ov.bound, mount }),
+            landingPage({ total: ov.total, available: ov.available, bound: ov.bound, mount, notWeChat: isNotWeChat(req) }),
             { head: isHead, pna, status: 200 },
           )
         }
@@ -1039,7 +1050,7 @@ export function createPageServer(opts = {}) {
           const ov = bindPortal.overview()
           return sendHtml(
             res,
-            wallPage({ mount, cards, remainNote: `池子里还有 ${Math.max(0, ov.available - cards.length)} 个没绑的号。` }),
+            wallPage({ mount, cards, remainNote: `池子里还有 ${Math.max(0, ov.available - cards.length)} 个没绑的号。`, notWeChat: isNotWeChat(req) }),
             { head: isHead, pna, status: 200 },
           )
         }
@@ -1150,7 +1161,9 @@ export function createPageServer(opts = {}) {
         // 手动释放所有占位（有人拿着码不确认挡住别人时用）
         if (req.method === "POST" && rest === "/api/release") {
           if (!bindPortal.authorize(req)) return sendAdminJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" }, req, { head: isHead })
-          return sendAdminJson(res, 200, bindPortal.releaseAll(), req, { head: isHead })
+          // 默认只清「没人盯」的会话；?all=1 才连正在被扫的也清（会作废别人手上的码）
+          const idleMs = url.searchParams.get("all") === "1" ? 0 : 60_000
+          return sendAdminJson(res, 200, bindPortal.releaseAll({ idleMs }), req, { head: isHead })
         }
 
         // 当前占位（只给数字，不含账号信息）

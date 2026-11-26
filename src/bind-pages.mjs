@@ -142,6 +142,12 @@ footer { color: #9ca3af; font-size: 12px; }
 .qr-sm { width: 100%; max-width: 130px; height: auto; image-rendering: pixelated; border-radius: 6px; }
 .cell-note { margin: 0; font-size: 12px; color: #4b5563; text-align: center; }
 .cell.is-done { border-color: #07c160; background: #f0fdf4; }
+.cell.is-done .cell-note { color: #07c160; font-weight: 800; font-size: 15px; }
+.done-banner {
+  display: none; margin: 6px 0 14px; padding: 14px 16px; border-radius: 14px;
+  background: #07c160; color: #fff; text-align: center; font-size: 18px; font-weight: 800;
+}
+.done-banner.on { display: block; }
 .cell.is-gone { opacity: .45; }
 @media (prefers-color-scheme: dark) {
   .cell { border-color: #2a303c; }
@@ -166,6 +172,10 @@ footer { color: #9ca3af; font-size: 12px; }
  */
 function layout(opts) {
   const script = opts.script ? `<script>${opts.script}</script>` : ""
+  // 非微信内置浏览器访问时，顶部直接挂一条提示：这类访问扫码链路走不通
+  const notWeChat = opts.notWeChat
+    ? `<div class="alert" style="max-width:980px;margin:0 auto 14px">你现在<b>不是从微信里</b>打开本页<small>微信「扫一扫」扫码才会跳「确认登录」；直接点链接/用浏览器打开，绑不成</small></div>`
+    : ""
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -176,6 +186,7 @@ function layout(opts) {
 <style>${CSS}</style>
 </head>
 <body>
+${notWeChat}
 ${opts.body}
 <footer>微信扫码绑定</footer>
 ${script}
@@ -207,7 +218,7 @@ export function landingPage(opts = {}) {
   <a class="btn secondary" href="${esc(wall)}">看全部待绑定账号（群里发这个也行）</a>
   <p class="hint">当前可分配 <strong>${available}</strong> 个 · 已绑定 <strong>${bound}</strong> / 共 ${total} 个</p>
 </div>`
-  return layout({ title: "微信绑定", body })
+  return layout({ title: "微信绑定", body, notWeChat: opts.notWeChat })
 }
 
 /**
@@ -263,6 +274,7 @@ export function wallPage(opts = {}) {
   <h1>随便挑一个扫，帮我们绑一个号</h1>
   <div class="alert">必须用微信「扫一扫」直接扫下面任意一张<small>相册选图 / 长按识别 无效；扫完在微信里点「确认登录」</small></div>
   <p class="hint">每张码有效期 5 分钟，过期会自己换新码；扫成功的那一格会变「已绑定」，别的格子照常可用。</p>
+  <div class="done-banner" id="done-banner">已绑定 ✓</div>
   <div class="grid">${grid}</div>
   <p class="hint"><a href="${esc(wall)}">刷新本页</a> · <a href="${esc(go)}">只给我一个号</a></p>
   ${opts.remainNote ? `<p class="hint">${esc(opts.remainNote)}</p>` : ""}
@@ -310,6 +322,26 @@ export function wallPage(opts = {}) {
       .catch(function () {});
   }
 
+  /** 绑定成功的「看得见 + 听得见」反馈：阵列页 6 格时很容易看漏哪一格成了。 */
+  function celebrate(label) {
+    var banner = document.getElementById("done-banner");
+    if (banner) {
+      banner.textContent = "已绑定 ✓ " + (label ? label + " 绑定成功" : "谢谢！");
+      banner.className = "done-banner on";
+      setTimeout(function () { banner.className = "done-banner"; }, 8000);
+    }
+    document.title = "✓ 已绑定 " + (label || "");
+    try {
+      var ctx = new (window.AudioContext || window.webkitAudioContext)();
+      var osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.frequency.value = 880; gain.gain.value = 0.08;
+      osc.start(); osc.frequency.setValueAtTime(1320, ctx.currentTime + 0.12);
+      osc.stop(ctx.currentTime + 0.3);
+    } catch (e) {}
+    if (navigator.vibrate) { try { navigator.vibrate([80, 60, 120]); } catch (e) {} }
+  }
+
   /** 每格独立轮询：状态可能是 bound / 换新码(renewed) / 失效（号已收回）。 */
   function watch(k, session) {
     var started = Date.now();
@@ -328,11 +360,12 @@ export function wallPage(opts = {}) {
             if (note) note.innerHTML = '<span class="ok">已绑定 ✓</span>';
             if (img) img.style.opacity = ".15";
             deadline[k] = 0;
+            celebrate(j.label || "");
             return;
           }
           if (j.status === "expired") {
             clearInterval(timer);
-            if (note) note.textContent = "这个号没人扫，正在换成新号…";
+            if (note) note.textContent = "这个号 5 分钟没人扫，已作废，正在换新号…";
             reassign(k);
             return;
           }
@@ -357,7 +390,7 @@ export function wallPage(opts = {}) {
   setInterval(tick, 1000);
 })();
 `
-  return layout({ title: "待绑定账号", body, script })
+  return layout({ title: "待绑定账号", body, script, notWeChat: opts.notWeChat })
 }
 
 /**
@@ -437,6 +470,16 @@ export function goPage(opts) {
           poll.innerHTML = '<span class="ok">绑定成功 ✓ 谢谢！</span>';
           qr.style.display = "none";
           document.getElementById("done").style.display = "block";
+          document.title = "✓ 绑定成功";
+          try {
+            var ctx = new (window.AudioContext || window.webkitAudioContext)();
+            var osc = ctx.createOscillator(), gain = ctx.createGain();
+            osc.connect(gain); gain.connect(ctx.destination);
+            osc.frequency.value = 880; gain.gain.value = 0.08;
+            osc.start(); osc.frequency.setValueAtTime(1320, ctx.currentTime + 0.12);
+            osc.stop(ctx.currentTime + 0.3);
+          } catch (e) {}
+          if (navigator.vibrate) { try { navigator.vibrate([80, 60, 120]); } catch (e) {} }
           document.getElementById("live").style.display = "none";
         } else if (j.status === "expired") {
           clearInterval(loop); clearInterval(timer);
@@ -463,7 +506,7 @@ export function goPage(opts) {
   }, interval);
 })();
 `
-  return layout({ title: `绑定账号 ${opts.label ?? ""}`, body, script })
+  return layout({ title: `绑定账号 ${opts.label ?? ""}`, body, script, notWeChat: opts.notWeChat })
 }
 
 /**

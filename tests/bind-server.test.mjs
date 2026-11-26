@@ -207,7 +207,14 @@ test("B10 POST /api/release：一键释放所有占位，之后重新从 #1 分�
   assert.match(a, /待绑定账号 #1/)
   assert.deepEqual(await fetch(`${base}/bind/api/occupancy`).then((r) => r.json()), { ok: true, sessions: 1, locks: 1, reserved: 0 })
 
-  const rel = await fetch(`${base}/bind/api/release`, { method: "POST" }).then((r) => r.json())
+  // ① 默认（不带 ?all=1）只清空闲会话：刚分配的还算「有人在扫」，不该被清掉
+  const kept = await fetch(`${base}/bind/api/release`, { method: "POST" }).then((r) => r.json())
+  assert.equal(kept.releasedLocks, 0, "刚出的码不该被默认清占用干掉")
+  assert.equal(kept.keptActive, 1)
+  assert.deepEqual(await fetch(`${base}/bind/api/occupancy`).then((r) => r.json()), { ok: true, sessions: 1, locks: 1, reserved: 0 })
+
+  // ② 显式 ?all=1 才连正在扫的一起清（运维真要重启时用）
+  const rel = await fetch(`${base}/bind/api/release?all=1`, { method: "POST" }).then((r) => r.json())
   assert.equal(rel.ok, true)
   assert.equal(rel.releasedLocks, 1)
   assert.deepEqual(await fetch(`${base}/bind/api/occupancy`).then((r) => r.json()), { ok: true, sessions: 0, locks: 0, reserved: 0 })

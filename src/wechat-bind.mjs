@@ -455,27 +455,47 @@ export function createBindPortal(opts) {
     },
 
     /**
-     * 释放**所有**占位（会话 / 锁 / 预留），把号全部还回池子。
+     * 释放占位，把号还回池子。
      *
-     * # 什么时候需要它
+     * # 参数
      *
-     * 占位锁只有 1 分半，到期会自动释放；但遇到这两种情况得手动清：
+     *	`idleMs` 只释放「这么久没被轮询过」的会话（默认 0 = 全放）。
+     *	传 `idleMs: 60_000` 就只清那些真没人管的，**正在被扫码人盯着的会话保留** ——
+     *	这是修掉「管理员一点释放，别人正在扫的码当场作废」那个坑的关键。
      *
-     *	· 有人（或扫描器）拿着码不确认，占着号挡住了真正想绑的人；
-     *	· 要停机/换域名，想让下一批扫码的人立刻从 #1 重新开始分配。
+     * # 为什么要区分
      *
-     * ⚠ 只清「占位」，**不动**快照里的 `wechatBound`：已经真的绑上微信的号不会被放回来。
+     * `state` 由平台签发、与账号绑定，但**一旦我们把这个会话丢掉，就再也查不到它属于哪个号**；
+     * 扫码人此时点「确认登录」，平台找不到映射 → 他那边看起来"确认了"，我们这边永远 pending。
+     * 所以「清占用」不能一刀切，默认先清空闲的，真要全清再显式传 0。
      *
-     * @returns {{ok: true, releasedSessions: number, releasedLocks: number, releasedReserved: number}}
+     * @param {{idleMs?: number}} [opts]
+     * @returns {{ok: true, releasedSessions: number, releasedLocks: number, releasedReserved: number,
+     *   keptActive: number}} `keptActive` = 因为还在被轮询而保留的会话数
      */
-    releaseAll() {
-      const releasedSessions = sessions.size
-      const releasedLocks = locks.size
+    releaseAll(opts = {}) {
+      const idleMs = Number.isFinite(Number(opts?.idleMs)) ? Math.max(0, Number(opts.idleMs)) : 0
+      const t = now()
+      let releasedSessions = 0
+      let keptActive = 0
+      /** 先记下总数：循环里按会话删锁，事后读 `locks.size` 就只剩留下的了。 */
+      const locksBefore = locks.size
+
+      for (const s of [...sessions.values()]) {
+        const idle = t - Number(s.lastSeenAt ?? s.issuedAt ?? 0)
+        if (idleMs > 0 && s.status === "pending" && idle < idleMs) {
+          keptActive += 1
+          continue
+        }
+        sessions.delete(s.sessionId)
+        if (locks.get(s.key) === s.sessionId) locks.delete(s.key) // ⚠ 只删自己的锁，别碰保留会话的
+        releasedSessions += 1
+      }
+
+      const releasedLocks = locksBefore - locks.size
       const releasedReserved = reserved.size
-      sessions.clear()
-      locks.clear()
       reserved.clear()
-      return { ok: true, releasedSessions, releasedLocks, releasedReserved, overview: poolOverview({ configDir }) }
+      return { ok: true, releasedSessions, releasedLocks, releasedReserved, keptActive, overview: poolOverview({ configDir }) }
     },
 
     /** 当前占位状态（不含任何账号信息，只给数字）。 */
@@ -651,6 +671,8 @@ export function createBindPortal(opts) {
       const entries = listPoolTokens(configDir)
       const label = labelOf(entries.map((a) => a.key), s.key)
       const token = String(entries.find((a) => a.key === s.key)?.token ?? "").trim()
+      // 记录「最后一次有人在轮询」—— releaseAll(idleMs) 靠它区分「有人盯着」与「僵尸会话」
+      s.lastSeenAt = now()
 
       if (s.status === "bound") return { status: "bound", label }
       if (s.status === "expired") return { status: "expired", message: "这次的码已失效，请重新扫码" }

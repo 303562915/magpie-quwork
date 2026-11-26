@@ -304,7 +304,8 @@ test("§29 releaseAll：一键把占位全放回池子（已绑的号不会被�
   assert.deepEqual(portal.occupancy(), { sessions: 2, locks: 2, reserved: 0 })
   assert.equal((await portal.allocate()).ok, false, "两个号都被占着，第三次分配应该没有号")
 
-  const rel = portal.releaseAll()
+  // 显式「全清」用 releaseAll({ idleMs: 0 })；默认（不传）只清没人盯的
+  const rel = portal.releaseAll({ idleMs: 0 })
   assert.equal(rel.releasedSessions, 2)
   assert.equal(rel.releasedLocks, 2)
   assert.deepEqual(portal.occupancy(), { sessions: 0, locks: 0, reserved: 0 })
@@ -330,6 +331,38 @@ test("§29b 真绑上的号不会被 releaseAll 放回池子", async (t) => {
   const next = await portal.allocate()
   assert.equal(next.label, "#2", "释放占位后 #1 仍然不会被发出去")
   assert.equal(poolOverview({ configDir: dir }).bound, 1)
+})
+
+// ── ㉛ 默认「清占用」不许动正在被扫的会话 ─────────────────────────────────
+//
+// 真机教训：管理员一点「释放所有占位」，正在扫码的人手上那张码当场失去映射，
+// 他在微信里点「确认登录」，平台找不到号 → 他那边像成功了，我们这边永远 pending。
+
+test("§31 releaseAll 默认只清空闲会话，保留正在被轮询的那一个", async (t) => {
+  let clock = 1_700_000_000_000
+  const platform = fakePlatform()
+  const dir = seed(t)
+  const portal = createBindPortal({ configDir: dir, platformBaseUrl: PLATFORM, fetchImpl: platform.fetchImpl, now: () => clock })
+  await portal.sync()
+
+  const live = await portal.allocate() // 有人正在盯
+  const zombie = await portal.allocate() // 没人管
+  assert.deepEqual(portal.occupancy(), { sessions: 2, locks: 2, reserved: 0 })
+
+  // 只让 live 有轮询记录（lastSeenAt），zombie 保持了很久没动
+  await portal.check(live.sessionId)
+  clock += 120_000 // 两分钟
+  await portal.check(live.sessionId) // live 刚刚又被轮询过
+
+  const rel = portal.releaseAll({ idleMs: 60_000 })
+  assert.equal(rel.releasedSessions, 1, "只该清掉没人管的那一个")
+  assert.equal(rel.keptActive, 1, "正在被扫的要留着")
+  assert.equal(portal.occupancy().locks, 1)
+
+  // live 还能继续（它没被作废）
+  assert.equal((await portal.check(live.sessionId)).status, "pending")
+  // zombie 已经作废
+  assert.equal((await portal.check(zombie.sessionId)).status, "expired")
 })
 
 // ── ⑨ token 失效的账号不参与分配 ────────────────────────────────────────
@@ -670,6 +703,20 @@ test("§28 占位 5 分钟 + 页面会自续码（过期不逼用户重扫固定
   const session = (body.match(/var sid = "([^"]+)"/) ?? [])[1]
   const st = await fetch(`${base}/bind/api/check?session=${session}`).then((r) => r.json())
   assert.ok(st.remainingMs <= 300_000 && st.remainingMs > 290_000, `剩余时间应 ≈300s，实际 ${st.remainingMs}`)
+})
+
+test("§32 绑定成功要有醒目反馈（顶部横幅 + 声音 + 标题变化），阵列页和出码页都要有", async (t) => {
+  const { base } = await startServer(t)
+  const wall = await fetch(`${base}/bind/wall?n=1`).then((r) => r.text())
+  assert.match(wall, /id="done-banner"/, "阵列页要有顶部「已绑定」横幅")
+  assert.match(wall, /function celebrate\(/, "绑定成功要触发 celebrate()")
+  assert.match(wall, /AudioContext/, "要有一声提示音")
+  assert.match(wall, /navigator\.vibrate/, "手机要震一下")
+  assert.match(wall, /document\.title = "✓ 已绑定/, "标题要变，切回浏览器也能看见")
+
+  const go = await fetch(`${base}/bind/go`).then((r) => r.text())
+  assert.match(go, /document\.title = "✓ 绑定成功"/, "单人页同样要有反馈")
+  assert.match(go, /绑定成功 ✓ 谢谢！/)
 })
 
 // ── ㉚ 过期续码：同一个号、新 state、页面不用重扫固定码 ──────────────────────
