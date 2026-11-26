@@ -1117,6 +1117,24 @@ export function createPageServer(opts = {}) {
           return sendAdminJson(res, 200, bindPortal.overview(), req, { head: isHead })
         }
 
+        // 阵列页补号：某一格的号被收回（5 分钟没人扫）后，前端立刻要一个新号，页面不用刷新
+        if (isGet && rest === "/api/reassign") {
+          const want = Math.max(1, Math.min(6, Number(url.searchParams.get("n")) || 1))
+          const cards = []
+          for (let i = 0; i < want; i += 1) {
+            const r = await bindPortal.allocate()
+            if (!r.ok) break
+            let qrDataUri = ""
+            try {
+              qrDataUri = `data:image/png;base64,${qrPng(r.authorizeUrl, { ecl: "L", scale: 6, border: 3 }).toString("base64")}`
+            } catch {
+              qrDataUri = ""
+            }
+            cards.push({ sessionId: r.sessionId, label: r.label, qrDataUri, ttlMs: r.ttlMs })
+          }
+          return json(200, { ok: cards.length > 0, cards })
+        }
+
         if (req.method === "POST" && rest === "/api/sync") {
           if (!bindPortal.authorize(req)) return sendAdminJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" }, req, { head: isHead })
           let input = {}

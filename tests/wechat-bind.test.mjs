@@ -712,7 +712,8 @@ test("§30 会话过期后 check 会原地续码（pending + qr + ttlMs），号
   clock += 2000
   const dead = await portal.check(a.sessionId)
   assert.equal(dead.status, "expired")
-  assert.match(String(dead.message ?? ""), /续了 2 次/)
+  assert.match(String(dead.message ?? ""), /已放回池子/)
+  assert.equal(dead.released, true, "作废时必须明确告诉前端「号已被收回」，阵列页据此换新号")
 })
 
 test("§27 出码页必须明确「用微信扫一扫直接扫，相册/长按识别无效」", async (t) => {

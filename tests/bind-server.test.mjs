@@ -291,6 +291,50 @@ test("B11b /bind/wall 没号时给友好页，不是 500", async (t) => {
   assert.match(await again.text(), /暂时没有空位|待绑定/)
 })
 
+test("B12 号被收回后前端能要新号（/bind/api/reassign），页面不用刷新", async (t) => {
+  const platform = fakeFetch()
+  const dir = tempDir(t)
+  upsertAccount(dir, { llmToken: "sk-a", token: "tok-a", uid: "u1" })
+  upsertAccount(dir, { llmToken: "sk-b", token: "tok-b", uid: "u2" })
+
+  let clock = 1_700_000_000_000
+  const server = createBindServer({
+    configDir: dir,
+    platformBaseUrl: PLATFORM,
+    fetchImpl: platform.fetchImpl,
+    now: () => clock,
+    wallWindowMs: 0,
+    allocateWindowMs: 0,
+    checkWindowMs: 0,
+    log: { warn() {} },
+  })
+  await new Promise((done) => server.listen(0, "127.0.0.1", done))
+  const base = `http://127.0.0.1:${server.address().port}`
+  t.after(() => new Promise((done) => server.close(() => done())))
+
+  // 网格拿一个号 → 5 分钟没人扫 → 服务端收回并明确告知
+  await fetch(`${base}/bind/wall?n=1`)
+  const first = await fetch(`${base}/bind/api/reassign?n=1`).then((r) => r.json())
+  assert.equal(first.ok, true)
+  assert.equal(first.cards.length, 1, "补号要直接给一张新码")
+  assert.ok(first.cards[0].qrDataUri.startsWith("data:image/png;base64,"))
+
+  // 把时钟推过 5 分钟占位 + 续码上限（默认续 6 次 ≈ 30 分钟），这个号会被释放
+  // ⚠ 一次 check 只续一张码，所以要连续轮到它耗尽
+  let lost = { status: "pending" }
+  for (let i = 0; i < 8 && lost.status === "pending"; i += 1) {
+    clock += 10 * 60 * 1000
+    lost = await fetch(`${base}/bind/api/check?session=${first.cards[0].sessionId}`).then((r) => r.json())
+  }
+  assert.equal(lost.status, "expired")
+  assert.equal(lost.released, true)
+
+  // 页面就是靠这个标记去要新号：要得到，而且不是刚才那个会话
+  const again = await fetch(`${base}/bind/api/reassign?n=1`).then((r) => r.json())
+  assert.equal(again.ok, true)
+  assert.notEqual(again.cards[0].sessionId, first.cards[0].sessionId)
+})
+
 test("B6 会话过期后先续码、续满才 expired（不是一直 pending）", async (t) => {
   let clock = 1_700_000_000_000
   const platform = fakeFetch()

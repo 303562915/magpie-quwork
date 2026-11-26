@@ -265,6 +265,25 @@ export function createBindServer(opts = {}) {
         return sendJson(res, 200, portal.overview())
       }
 
+      // 阵列页补号：某一格的号被收回（5 分钟没人扫）后，前端立刻要一个新号，页面不用刷新
+      if (isGet && rest === "/api/reassign") {
+        if (!allow(`reassign|${ipOf(req)}`, 3000)) return sendJson(res, 200, { ok: false, cards: [], message: "太快了" })
+        const want = Math.max(1, Math.min(6, Number(url.searchParams.get("n")) || 1))
+        const cards = []
+        for (let i = 0; i < want; i += 1) {
+          const r = await portal.allocate()
+          if (!r.ok) break
+          let qrDataUri = ""
+          try {
+            qrDataUri = `data:image/png;base64,${qrPng(r.authorizeUrl, { ecl: "L", scale: 6, border: 3 }).toString("base64")}`
+          } catch {
+            qrDataUri = ""
+          }
+          cards.push({ sessionId: r.sessionId, label: r.label, qrDataUri, ttlMs: r.ttlMs })
+        }
+        return sendJson(res, 200, { ok: cards.length > 0, cards })
+      }
+
       if (req.method === "POST" && rest === "/api/sync") {
         if (!portal.authorize(req)) return sendJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" })
         const r = await refreshPool({ configDir, fetchImpl: opts.fetchImpl, now })

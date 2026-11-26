@@ -272,6 +272,7 @@ export function wallPage(opts = {}) {
 (function () {
   var cards = ${meta};
   var checkUrl = ${JSON.stringify(checkUrl).replace(/</g, "\\u003c")};
+  var reassignUrl = ${JSON.stringify(pathOf(mount, "/bind/api/reassign")).replace(/</g, "\\u003c")};
   var interval = ${pollMs};
   var maxWait = ${maxWaitMs};
   var deadline = [];
@@ -283,7 +284,33 @@ export function wallPage(opts = {}) {
       el.textContent = String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
     }
   }
-  /** 每格独立轮询：状态可能是 bound / 换新码(renewed) / 失效。 */
+  /** 这一格的号被收回（5 分钟没人扫）→ 立刻要一个新号，页面不用刷新。 */
+  function reassign(k) {
+    fetch(reassignUrl + "?n=1", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        var card = j && j.cards && j.cards[0];
+        if (!card) {
+          var note = document.getElementById("note-" + k);
+          if (note) note.textContent = "池子里暂时没有空号，等会儿刷新本页";
+          return;
+        }
+        cards[k] = { i: k, session: card.sessionId, ttl: card.ttlMs };
+        var img = document.getElementById("qr-" + k);
+        if (img) { img.src = card.qrDataUri; img.style.opacity = "1"; }
+        var head = document.querySelector("#cell-" + k + " .badge");
+        if (head) head.textContent = "待绑定 " + card.label;
+        var cell = document.getElementById("cell-" + k);
+        if (cell) cell.classList.remove("is-gone", "is-done");
+        var note = document.getElementById("note-" + k);
+        if (note) note.textContent = "换了个新号，用微信扫这张";
+        deadline[k] = Date.now() + card.ttl;
+        watch(k, card.sessionId);
+      })
+      .catch(function () {});
+  }
+
+  /** 每格独立轮询：状态可能是 bound / 换新码(renewed) / 失效（号已收回）。 */
   function watch(k, session) {
     var started = Date.now();
     var lastQr = "";
@@ -305,10 +332,12 @@ export function wallPage(opts = {}) {
           }
           if (j.status === "expired") {
             clearInterval(timer);
-            if (cell) cell.classList.add("is-gone");
-            if (note) note.textContent = j.message || "已失效，刷新本页";
-            deadline[k] = 0;
+            if (note) note.textContent = "这个号没人扫，正在换成新号…";
+            reassign(k);
             return;
+          }
+          if (j.remainingMs === 0 && !j.qr && note) {
+            note.textContent = "正在换新码…";
           }
           if (j.qr && j.renewed && j.qr !== lastQr) {
             lastQr = j.qr;

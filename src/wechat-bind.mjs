@@ -671,10 +671,11 @@ export function createBindPortal(opts) {
 
         const renewals = Number(s.renewals ?? 0)
         if (renewals >= maxRenewals) {
+          // 这个号被冷落太久：**立刻释放**，让下一次分配能把它分给别人
           s.status = "expired"
           s.settledAt = now()
           if (locks.get(s.key) === s.sessionId) locks.delete(s.key)
-          return { status: "expired", message: `续了 ${renewals} 次码都没人扫，请重新开始` }
+          return { status: "expired", released: true, message: `这个号 ${Math.round((maxRenewals * sessionTtlMs) / 60000)} 分钟没人扫，已放回池子，请刷新本页` }
         }
 
         const got = await fetchAuthorizeUrl({ platformBaseUrl, token, fetchImpl })
