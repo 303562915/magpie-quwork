@@ -5,7 +5,7 @@
 
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -153,8 +153,11 @@ test("B8 库模式默认不写访问日志（测试/嵌入时不该往仓库落�
   const base = `http://127.0.0.1:${server.address().port}`
   t.after(() => new Promise((done) => server.close(() => done())))
 
+  const stray = join(process.cwd(), "bind-access.log")
+  const before = existsSync(stray) ? statSync(stray).mtimeMs : 0
   await fetch(`${base}/bind`)
-  assert.equal(existsSync(join(process.cwd(), "bind-access.log")), false, "不该在 cwd 落日志")
+  const after = existsSync(stray) ? statSync(stray).mtimeMs : 0
+  assert.equal(after, before, "库模式不该往 cwd 写日志")
 })
 
 test("B9 绑定成功要单独落一行 BOUND（回答「有人绑定了吗」不用翻池子）", async (t) => {
@@ -376,4 +379,39 @@ test("B6 会话过期后先续码、续满才 expired（不是一直 pending）"
     last = await fetch(`${base}/bind/api/check?session=${session}`).then((r) => r.json())
   }
   assert.equal(last.status, "expired", "续满次数后必须真的作废，不能一直 pending")
+})
+
+test("B13 bind-batch：给未绑号批量出码，已绑的跳过，产出可打印码表 + 对照表", async (t) => {
+  const { buildBatch } = await import("../scripts/bind-batch.mjs")
+  const dir = tempDir(t)
+  upsertAccount(dir, { llmToken: "sk-a", token: "tok-a", uid: "u1", phone: "17000000001" })
+  upsertAccount(dir, { llmToken: "sk-b", token: "tok-b", uid: "u2", phone: "17000000002" })
+  upsertAccount(dir, { llmToken: "sk-c", token: "tok-c", uid: "u3", phone: "17000000003" })
+
+  const platform = fakeFetch(["tok-b"]) // b 已绑 → 不该出现在码表里
+  const outHtml = join(tempDir(t), "batch.html")
+  const r = await buildBatch({
+    configDir: dir,
+    platformBaseUrl: PLATFORM,
+    fetchImpl: platform.fetchImpl,
+    perPage: 2,
+    outHtml,
+  })
+
+  assert.equal(r.ok, true)
+  assert.equal(r.made, 2, "3 个号里 1 个已绑，应只出 2 张")
+  assert.equal(r.skipped, 1)
+  assert.equal(r.pages, 1, "2 个一张 A4")
+  assert.deepEqual(r.items.map((i) => i.label), ["#1", "#3"], "编号沿用池子顺序")
+
+  const html = readFileSync(outHtml, "utf8")
+  assert.equal((html.match(/data:image\/png;base64,/g) ?? []).length, 2, "码表里应有 2 张码")
+  assert.match(html, /必须用微信|扫一扫/)
+  assert.match(html, /#1/)
+  assert.match(html, /#3/)
+  assert.ok(!html.includes("#2"), "已绑的号不该出现在码表里")
+
+  const csv = readFileSync(r.outCsv, "utf8")
+  assert.match(csv, /编号,账号key,手机号尾号,state/)
+  assert.match(csv, /quwork#2/, "对照表里要有真实 key（只给自己看）")
 })
