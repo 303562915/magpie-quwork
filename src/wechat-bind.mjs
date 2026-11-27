@@ -997,6 +997,7 @@ export function createBindPortal(opts) {
           status: "pending",
           label,
           scanState: s.scanState,
+          attempts: s.attempts ?? 0,
           remainingMs: Math.max(0, s.expiresAt - now()),
           ...(s.scanError ? { message: s.scanError } : {}),
           ...(s.uuid ? { confirmUrl: s.confirmUrl } : {}),
