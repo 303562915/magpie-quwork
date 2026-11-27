@@ -907,3 +907,50 @@ test("§33 allocateOne：给指定账号出码；已绑的拒绝；不支持的�
   assert.equal(nope.ok, false)
   assert.equal(nope.reason, "unknown-key")
 })
+
+// ── ㉞ 关键回归：success:false 的响应里也必须能拿到 wechat_token ──────────
+//
+// 真机 HAR（2026-11-27）：
+//   GET /api/oauth/wechat?code=…&platform=qurvis&channelId=desktop_client&state=…
+//   → {"data":{"bind_type":"need_bind","wechat_token":"f536…"},"message":"请先绑定手机号","success":false}
+// 而 callPlatform 遇到 success:false 只回 message、把 data 丢掉 —— 之前一直换不到 token 就是这个。
+
+test("§34 exchangeCode：success=false 但 data 里有 wechat_token 也要拿到（真机 HAR 形状）", async () => {
+  const { exchangeCode } = await import("../src/wechat.mjs")
+  const calls = []
+  const fetchImpl = async (url) => {
+    calls.push(String(url))
+    return Response.json({
+      data: { bind_type: "need_bind", wechat_token: "f536f1915a774705860b881f464ef6ad" },
+      message: "请先绑定手机号",
+      success: false,
+    })
+  }
+  const r = await exchangeCode({ platformBaseUrl: "https://p.example", code: "C1", state: "d58432920e9f80154120080b9f829ef1", fetchImpl })
+  assert.equal(r.ok, true)
+  assert.equal(r.wechatToken, "f536f1915a774705860b881f464ef6ad")
+  assert.match(calls[0], /channelId=desktop_client/, "要按客户端那样带 channelId")
+  assert.match(calls[0], /state=d58432920e9f80154120080b9f829ef1/)
+})
+
+test("§34b exchangeCode：已绑微信（success=true + user）→ 判定 already-bound，不再找 token", async () => {
+  const { exchangeCode } = await import("../src/wechat.mjs")
+  let n = 0
+  const fetchImpl = async () => {
+    n += 1
+    return Response.json({ data: { token: "t", user: { id: 7, username: "19156057259" }, is_new: false }, message: "", success: true })
+  }
+  const r = await exchangeCode({ platformBaseUrl: "https://p.example", code: "C2", state: "s", fetchImpl })
+  assert.equal(r.ok, false)
+  assert.equal(r.kind, "already-bound")
+  assert.equal(r.boundAccount, "19156057259")
+  assert.equal(n, 1, "已判定已绑就不再打第二次")
+})
+
+test("§34c exchangeCode：bind_type=bind → 视为绑定成功", async () => {
+  const { exchangeCode } = await import("../src/wechat.mjs")
+  const fetchImpl = async () => Response.json({ data: { bind_type: "bind" }, message: "", success: true })
+  const r = await exchangeCode({ platformBaseUrl: "https://p.example", code: "C3", state: "s", fetchImpl })
+  assert.equal(r.ok, true)
+  assert.equal(r.alreadyBoundOk, true)
+})

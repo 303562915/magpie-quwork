@@ -687,8 +687,16 @@ export function createBindPortal(opts) {
       const got = await fetchAuthorizeUrl({ platformBaseUrl, token, fetchImpl })
       if (!got.ok || !got.state) return { ok: false, reason: "upstream", message: got.message ?? "取授权地址失败" }
 
+      // ── 用客户端同样的配方：state 自己生成 32 位 hex ──
+      //
+      // HAR（2026-11-27）里能让平台回 need_bind + wechat_token 的那次，state 是
+      // d58432920e9f80154120080b9f829ef1（32 hex，客户端自己造的），并且换取时带了
+      // channelId=desktop_client。平台签发的 16 位 state 反而被当成「登录」。
+      const clientState = randomUUID().replace(/-/g, "")
+      const authorizeUrl = String(got.url).replace(/state=[^&#]+/, `state=${clientState}`)
+
       // 打开授权页取 uuid —— 这一步是关键，qrconnect 本身不能当二维码内容
-      const opened = await openAuthorizePage({ authorizeUrl: got.url, fetchImpl })
+      const opened = await openAuthorizePage({ authorizeUrl, fetchImpl })
       if (!opened.ok || !opened.uuid) {
         return { ok: false, reason: "no-uuid", message: opened.message ?? "授权页没给 uuid" }
       }
@@ -698,8 +706,8 @@ export function createBindPortal(opts) {
       const session = {
         sessionId,
         key: want,
-        state: got.state,
-        authorizeUrl: String(got.url),
+        state: clientState,
+        authorizeUrl,
         uuid: opened.uuid,
         confirmUrl,
         issuedAt: now(),
@@ -736,7 +744,7 @@ export function createBindPortal(opts) {
         sessionId,
         uuid: opened.uuid,
         confirmUrl,
-        state: got.state,
+        state: clientState,
         qr,
         ttlMs: sessionTtlMs,
       }
