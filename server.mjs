@@ -1579,13 +1579,25 @@ function sendAdminJson(res, status, obj, req, opts = {}) {
  */
 export const QuWorkPage = async (input = {}, options = {}) => {
   const configDir = String(input?.directory ?? options?.configDir ?? "").trim()
-  // 端口：options.port → $PAGESVC_PORT → 4392；被占则回退（4392→4393→4394）
+  // 端口：options.port → $PAGESVC_PORT → 4392
   const want = resolvePort(options, globalThis.process?.env, 4392) || 4392
-  const startPort = Number(options?.port) > 0 ? Number(options.port) : want
+  const explicitPort = Number.isFinite(Number(options?.port)) ? Number(options.port) : null
+  // 显式传 `port: 0` 表示「随便给我一个空闲口」（测试并行要用，生产不会传）。
+  const startPort = explicitPort === 0 ? 0 : explicitPort !== null && explicitPort > 0 ? explicitPort : want
 
-  const chosen = await pickPort({ start: startPort, max: 3, isFree: options?.isFree })
-  if (!chosen) {
-    return { ok: false, port: 0, close: async () => {}, reason: `${startPort}~${startPort + 2} 都被占用` }
+  // ⚠ 默认端口（没人显式指定时用的 4392）**不再漂移**：
+  //   以前被占就回退 4392→4393→4394，结果每次 plugin update 端口会变，
+  //   书签打开是空白、公网隧道还指向旧端口。
+  //   只有「调用方显式给了端口」才允许回退（宿主/测试可以这么用）。
+  const maxFallback = explicitPort !== null && explicitPort > 0 ? 3 : 1
+  const chosen = await pickPort({ start: startPort, max: maxFallback, isFree: options?.isFree })
+  if (!chosen && startPort !== 0) {
+    return {
+      ok: false,
+      port: 0,
+      close: async () => {},
+      reason: `${startPort} 被占用（默认端口已固定，不再漂移到别的口）`,
+    }
   }
 
   const server = createPageServer({
