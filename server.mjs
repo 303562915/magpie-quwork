@@ -33,7 +33,7 @@ import { readAll } from "./src/auth-store.mjs"
 import { rememberUsage, windowsFromSelf } from "./src/hooks/usage.mjs"
 import { refreshCatalogCache } from "./src/hooks/models.mjs"
 import { buildAuthorizeUrl, bindWechat, exchangeCode, newState, parseCallback } from "./src/wechat.mjs"
-import { createBindPortal } from "./src/wechat-bind.mjs"
+import { createBindPortal, fetchAuthorizeUrl } from "./src/wechat-bind.mjs"
 import { errorPage, goPage, landingPage, noAccountPage, wallPage } from "./src/bind-pages.mjs"
 import { qrPng } from "./src/qr.mjs"
 
@@ -918,7 +918,17 @@ export function createPageServer(opts = {}) {
       const key = String(input?.key ?? "").trim() || listKeys()[0] || ""
       if (!key) return { ok: false, error: "没有账号" }
 
-      const state = newState()
+      // ⚠ 原来这里用 `newState()` 自己造 32 hex —— 实测这样拿到的 state 换不到
+      //   `wechat_token`（平台只认它按该账号 token 签发的 state），而且平台侧
+      //   「按 state 找账号」也认不出来，最后只能变成「登录」。
+      //   正确做法：用该号 token 去 `/api/oauth/wechat/url` 拿平台签发的 state。
+      const token = tokenOfKey(key)
+      if (!token) return { ok: false, error: "这个账号没有平台 token" }
+
+      const got = await fetchAuthorizeUrl({ platformBaseUrl, token, fetchImpl })
+      if (!got.ok || !got.state) return { ok: false, error: got.message ?? "取不到平台签发的授权地址" }
+
+      const state = got.state
       wechatStates.set(state, { key, at: now() })
 
       // 顺手清掉过期的（表小，全扫一遍即可）
@@ -926,7 +936,7 @@ export function createPageServer(opts = {}) {
         if (now() - v.at > WECHAT_STATE_TTL_MS) wechatStates.delete(s)
       }
 
-      return { ok: true, key, state, url: buildAuthorizeUrl({ state }) }
+      return { ok: true, key, state, url: got.url }
     },
 
     /**

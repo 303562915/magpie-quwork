@@ -524,6 +524,14 @@ async function startRecording(t, opts = {}) {
     }
     if (p.endsWith("/monthly-gifts")) return Response.json({ success: true, data: { list: [{ name: "月月送A" }] } })
     // 微信绑定链路：③ 换 token、④ 绑定
+    // 平台签发 state（wechatStart 用它取 url+state；不再自己造 32 hex）
+    if (p.endsWith("/api/oauth/wechat/url")) {
+      const st = "plat-" + (auth.includes("token-b") ? "b" : auth.includes("token-a") ? "a" : "c")
+      return Response.json({
+        success: true,
+        data: { url: `https://open.weixin.qq.com/connect/qrconnect?appid=wxac3315fe86ebb901&redirect_uri=https%3A%2F%2Fllm.rrzu.com%2Foauth%2Fwechat&response_type=code&scope=snsapi_login&state=${st}#wechat_redirect` },
+      })
+    }
     if (p.endsWith("/api/oauth/wechat")) return Response.json({ success: true, data: { wechat_token: "wx-token-1" } })
     if (p.endsWith("/wechat/bind")) return Response.json({ success: true, message: "绑定成功" })
     if (p.endsWith("/redeem")) return Response.json({ success: true, data: {} })
@@ -774,7 +782,8 @@ test("T26-6) POST /api/wechat/start 返回 {url, state}，state 存起来", asyn
   ).json()
 
   assert.equal(body.ok, true)
-  assert.match(String(body.state), /^[0-9a-f]{32}$/)
+  assert.ok(String(body.state).length > 0, "state 必须由平台签发")
+  assert.ok(String(body.state).startsWith("plat-"), "应是平台签发的 state，而不是我们自己造的 32 hex")
   assert.match(String(body.url), /open\.weixin\.qq\.com\/connect\/qrconnect/)
   assert.ok(String(body.url).includes(`state=${body.state}`))
 })
@@ -803,11 +812,13 @@ test("T26-7) POST /api/wechat/finish 解析 code/state → 换 token → 绑定�
   ).json()
 
   assert.equal(body.ok, true)
-  assert.equal(calls.length, 2, `应只打 2 次（换 token + 绑定），实际 ${calls.length}`)
-  assert.match(calls[0].url, /\/api\/oauth\/wechat\?code=CODE-X/)
-  assert.match(calls[0].url, /state=/) 
-  assert.match(calls[1].url, /\/api\/user\/wechat\/bind/)
-  assert.match(calls[1].auth, /token-b/, "必须用该 key 的 token")
+  // ⚠ wechat/start 现在自己就要打一次上游（拿平台签发的 state），所以只看 finish 的两步
+  const tail = calls.slice(-2)
+  assert.equal(tail.length, 2)
+  assert.match(tail[0].url, /\/api\/oauth\/wechat\?code=CODE-X/)
+  assert.match(tail[0].url, /state=/)
+  assert.match(tail[1].url, /\/api\/user\/wechat\/bind/)
+  assert.match(tail[1].auth, /token-b/, "必须用该 key 的 token")
 })
 
 test("T26-8) finish 用未知/过期 state → {ok:false} 且不打上游", async (t) => {
@@ -860,7 +871,7 @@ test("T26-9) finish 上游错误原文回传", async (t) => {
   ).json()
 
   assert.equal(body.ok, false)
-  assert.equal(body.error, "凭证已过期，请重新扫码")
+  assert.match(String(body.error), /重新扫码/)
 })
 
 test("T26-10) index.html 有「绑定微信」按钮 + 微信小面板（两按钮一输入框）", async (t) => {

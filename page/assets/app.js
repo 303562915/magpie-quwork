@@ -380,6 +380,18 @@ async function showQrRow(btn, key) {
             <button class="tiny danger" data-qr="close">收起</button>
           </div>
           <p class="hint" data-qr="status">等待扫码…</p>
+          <p class="hint" style="margin-top:6px;color:#b45309">
+            <strong>更可靠的做法（真绑定）</strong>：下面这个按钮走「扫完把地址粘回来」的流程 ——
+            扫码的人点完「确认登录」后，把你给他的那串地址整段发回来，贴进去就能真绑上这个号。
+          </p>
+          <div class="toolbar-actions">
+            <button class="tiny primary" data-qr="paste">用回调地址完成绑定</button>
+          </div>
+          <div data-qr="paste-box" hidden style="margin-top:6px">
+            <input class="field-input" data-qr="paste-input" style="width:100%;margin-bottom:6px"
+              placeholder="粘贴 https://llm.rrzu.com/oauth/wechat?code=...&state=... 整段">
+            <button class="tiny primary" data-qr="paste-do">提交绑定</button>
+          </div>
         </div>
       </div>
     </td>`
@@ -411,6 +423,33 @@ async function showQrRow(btn, key) {
         }
       } catch (e) {
         status.textContent = `查询失败：${String(e?.message ?? e)}`
+      }
+    })
+
+    // 「用回调地址完成绑定」：真绑定走的是 POST /api/wechat/finish（换 wechat_token → bind）
+    const box = row.querySelector('[data-qr="paste-box"]')
+    row.querySelector('[data-qr="paste"]').addEventListener("click", () => {
+      box.hidden = !box.hidden
+      if (!box.hidden) row.querySelector('[data-qr="paste-input"]').focus()
+    })
+    row.querySelector('[data-qr="paste-do"]').addEventListener("click", async () => {
+      const callbackUrl = String(row.querySelector('[data-qr="paste-input"]').value ?? "").trim()
+      if (!callbackUrl) return toast("先把扫码后的地址粘进来", true)
+      status.textContent = "正在换 wechat_token 并绑定…"
+      try {
+        const r = await api("/api/wechat/finish", { key, callbackUrl })
+        if (!r?.ok) {
+          status.textContent = `❌ ${r?.error ?? "绑定失败"}`
+          toast(String(r?.error ?? "绑定失败"), true)
+          return
+        }
+        status.textContent = "✅ 已绑定（平台确认 wechat_bound=true）"
+        toast("绑定成功")
+        box.hidden = true
+        void loadAccounts()
+      } catch (e) {
+        status.textContent = `❌ ${String(e?.message ?? e)}`
+        toast(String(e?.message ?? e), true)
       }
     })
   } finally {
