@@ -483,9 +483,24 @@ export function createBindPortal(opts) {
       const ex = await exchangeCode({ code: r.code, state: session.state, platformBaseUrl, fetchImpl })
       session.exchangeDebug = { attempts: ex.attempts, raws: ex.raws, via: ex.via }
       if (!ex.ok) {
-        session.scanError = `换 wechat_token 失败：${ex.message}`
+        // 平台判定「这个微信已经绑过账号」——这是**结论**，不是失败：
+        // 微信 OAuth 只允许一个微信绑一个账号，平台会直接登录而不是再签发绑定凭证。
         session.status = "expired"
         session.settledAt = now()
+        session.scanState = "already-bound"
+        session.alreadyBound = ex.kind === "already-bound"
+        session.boundAccount = ex.boundAccount ?? ""
+        session.scanError = ex.message
+        if (locks.get(session.key) === session.sessionId) locks.delete(session.key)
+        return
+      }
+      if (ex.alreadyBoundOk) {
+        // 平台自己回 bind_type=bind：绑定完成
+        session.status = "bound"
+        session.settledAt = now()
+        session.scanState = "bound"
+        session.verified = true
+        markBound(session.key, { wechatId: "" })
         if (locks.get(session.key) === session.sessionId) locks.delete(session.key)
         return
       }
@@ -987,6 +1002,7 @@ export function createBindPortal(opts) {
           status: "expired",
           released: true,
           scanState: s.scanState ?? "expired",
+          ...(s.alreadyBound ? { alreadyBound: true, boundAccount: s.boundAccount ?? "" } : {}),
           message: s.scanError || "这次的码已失效，请重新扫码",
           ...(s.exchangeDebug ? { debug: s.exchangeDebug } : {}),
         }

@@ -118,6 +118,44 @@ export async function exchangeCode(opts) {
   const attempts = []
   const raws = {}
 
+  /**
+   * 分类一次换取结果。
+   *
+   * 平台前端（`assets/WeChatOAuth-*.js`）的实现是这样的：
+   *
+   *	GET /api/oauth/web-wechat?code&state
+   *	  · data.bind_type === "bind"                → 微信绑定成功
+   *	  · data.bind_type === "need_bind" 且有 token → 这个微信**还没绑任何账号**，
+   *	                                                给 wechat_token，再去 login_bind/绑定
+   *	  · 其它（返回 token + user）                 → **直接登录**，说明这个微信
+   *	                                                已经绑定了某个账号
+   *
+   * 所以「扫码后平台把我登录进去」本身就是平台给的判定：
+   * **该微信已被绑定**。这种情况不是我们的 bug，也不该再去找 wechat_token。
+   */
+  const classify = (d) => {
+    if (!d || typeof d !== "object") return { kind: "unknown" }
+    const bindType = String(d.bind_type ?? d.bindType ?? "").trim()
+
+    if (bindType === "bind") return { kind: "bound-ok" }
+
+    const wechatToken = String(d.wechat_token ?? d.wechatToken ?? "").trim()
+    if (bindType === "need_bind" && wechatToken) return { kind: "need-bind", wechatToken }
+    if (wechatToken) return { kind: "need-bind", wechatToken }
+
+    // 登录载荷：平台认出了这个微信属于某个账号
+    const user = d.user && typeof d.user === "object" ? d.user : null
+    if (user) {
+      return {
+        kind: "already-bound",
+        boundAccount: String(user.username || user.display_name || user.phone || "").trim(),
+        boundUserId: user.id,
+        isNew: Boolean(d.is_new ?? d.isNew),
+      }
+    }
+    return { kind: "unknown" }
+  }
+
   const tryOne = async (label, path, qs) => {
     const r = await callPlatform({
       platformBaseUrl,
@@ -127,24 +165,63 @@ export async function exchangeCode(opts) {
       fetchImpl: opts.fetchImpl,
     })
     const d = r.data?.data ?? r.data ?? {}
-    const wechatToken = String(d.wechat_token ?? d.wechatToken ?? "").trim()
-    raws[label] = { ok: r.ok, message: r.message ?? "", keys: Object.keys(d ?? {}).slice(0, 20) }
-    attempts.push({ label, ok: r.ok, gotToken: Boolean(wechatToken), message: r.message ?? "" })
-    return { ok: r.ok, wechatToken, data: d, message: r.message }
+    const cls = classify(d)
+    raws[label] = {
+      ok: r.ok,
+      message: r.message ?? "",
+      bindType: d?.bind_type ?? null,
+      keys: Object.keys(d ?? {}).slice(0, 20),
+      ...(cls.boundAccount ? { boundAccount: cls.boundAccount } : {}),
+    }
+    attempts.push({ label, ok: r.ok, kind: cls.kind, message: r.message ?? "" })
+    return { r, d, cls }
   }
 
-  // ① 网页端那条（按 state 找账号，最可能给 wechat_token）
+  // ① 网页端那条（平台前端自己用的就是它，能区分 bind / need_bind / 登录）
   const web = new URLSearchParams({ code, state })
   const webR = await tryOne("web-wechat", WECHAT_PATHS.web, web)
-  if (webR.ok && webR.wechatToken) return { ok: true, wechatToken: webR.wechatToken, via: "web-wechat", attempts, raws }
+  if (webR.cls.kind === "need-bind") {
+    return { ok: true, wechatToken: webR.cls.wechatToken, via: "web-wechat", attempts, raws }
+  }
+  if (webR.cls.kind === "bound-ok") {
+    return { ok: true, alreadyBoundOk: true, via: "web-wechat", attempts, raws }
+  }
+  if (webR.cls.kind === "already-bound") {
+    // 平台已经把「这个微信属于哪个账号」告诉我们了 —— 这就是结论，不用再试别的接口
+    return {
+      ok: false,
+      kind: "already-bound",
+      boundAccount: webR.cls.boundAccount,
+      boundUserId: webR.cls.boundUserId,
+      message: `这个微信已经绑定过平台账号${webR.cls.boundAccount ? "（" + webR.cls.boundAccount + "）" : ""}，平台直接登录了，不会签发绑定凭证`,
+      attempts,
+      raws,
+    }
+  }
 
-  // ② 经典换取接口（可能是登录，但也要试）
+  // ② 经典换取接口（平台桌面端用；可能给登录，也可能给 need_bind）
   const qs = new URLSearchParams({ code, platform: "qurvis", state })
   const oauthR = await tryOne("oauth/wechat", WECHAT_PATHS.oauth, qs)
-  if (oauthR.ok && oauthR.wechatToken) return { ok: true, wechatToken: oauthR.wechatToken, via: "oauth/wechat", attempts, raws }
+  if (oauthR.cls.kind === "need-bind") {
+    return { ok: true, wechatToken: oauthR.cls.wechatToken, via: "oauth/wechat", attempts, raws }
+  }
+  if (oauthR.cls.kind === "bound-ok") {
+    return { ok: true, alreadyBoundOk: true, via: "oauth/wechat", attempts, raws }
+  }
+  if (oauthR.cls.kind === "already-bound") {
+    return {
+      ok: false,
+      kind: "already-bound",
+      boundAccount: oauthR.cls.boundAccount,
+      boundUserId: oauthR.cls.boundUserId,
+      message: `这个微信已经绑定过平台账号${oauthR.cls.boundAccount ? "（" + oauthR.cls.boundAccount + "）" : ""}，平台直接登录了，不会签发绑定凭证`,
+      attempts,
+      raws,
+    }
+  }
 
-  const msg = oauthR.message || webR.message || "两个接口都没返回 wechat_token"
-  return { ok: false, message: msg, attempts, raws }
+  const msg = oauthR.r?.message || webR.r?.message || "平台没给 wechat_token，也没说已绑定"
+  return { ok: false, kind: "unknown", message: msg, attempts, raws }
 }
 
 /**
