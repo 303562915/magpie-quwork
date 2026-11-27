@@ -29,7 +29,8 @@ import {
   redeemBenefit,
 } from "./src/invite.mjs"
 import { deviceIdentifierFrom } from "./src/login.mjs"
-import { readAll } from "./src/auth-store.mjs"
+import { readAll, upsertAccount } from "./src/auth-store.mjs"
+import { discoverFromDesktop } from "./src/desktop-client.mjs"
 import { rememberUsage, windowsFromSelf } from "./src/hooks/usage.mjs"
 import { refreshCatalogCache } from "./src/hooks/models.mjs"
 import { buildAuthorizeUrl, bindWechat, exchangeCode, newState, parseCallback } from "./src/wechat.mjs"
@@ -608,6 +609,77 @@ export function createPageServer(opts = {}) {
      * ⚠ **先备份**：`plugin-auth.json.bak-<时间戳>`。删号是不可逆操作，
      * 用户点错一次就得重新登录一遍 —— 备份是成本最低的保险。
      */
+    /**
+     * 读取**本机 QuWork 桌面客户端**的登录态，导入成账号。
+     *
+     * # 为什么要有它
+     *
+     * 用户在客户端里已经登录过的账号，没必要再走一遍扫码/贴 token：
+     * 客户端（Electron）把会话落在 `%APPDATA%\qurwork-desktop` 里，
+     * 我们只读地把 JWT 捞出来、用 `/api/user/self` 验活、再用 `/api/token` 补齐模型 token。
+     *
+     * # 两段式
+     *
+     *	· `dryRun !== false`（默认）→ 只探测并返回清单，**不写文件**
+     *	· `dryRun === false` → 把探测到的（可按 usernames 过滤）写进 plugin-auth.json
+     *
+     * @param {{dryRun?: boolean, usernames?: string[]}} [input]
+     */
+    async accountsFromDesktop(input) {
+      const found = await discoverFromDesktop({ platformBaseUrl, fetchImpl, withModelToken: true })
+      if (!found.ok) return { ok: false, error: found.message, dirs: found.dirs, scanned: found.scanned }
+
+      /** @type {any[]} */
+      const rows = found.accounts
+      if (input?.dryRun !== false) {
+        return {
+          ok: true,
+          dryRun: true,
+          dirs: found.dirs,
+          scanned: found.scanned,
+          accounts: rows.map((a) => ({
+            username: a.username,
+            userId: a.userId,
+            wechatBound: a.wechatBound,
+            quota: a.quota,
+            source: a.source,
+            hasModelToken: Boolean(a.llmToken),
+            modelTokenError: a.modelTokenError || "",
+          })),
+        }
+      }
+
+      if (!configDir) return { ok: false, error: "没有配置目录，无法写入账号" }
+
+      const wanted = (Array.isArray(input?.usernames) ? input.usernames : []).map(String).filter(Boolean)
+      const targets = wanted.length > 0 ? rows.filter((a) => wanted.includes(a.username)) : rows
+      if (targets.length === 0) return { ok: false, error: "没有匹配的账号要导入" }
+
+      /** @type {any[]} */
+      const imported = []
+      /** @type {any[]} */
+      const failed = []
+      for (const a of targets) {
+        if (!a.llmToken) {
+          failed.push({ username: a.username, reason: a.modelTokenError || "没有模型 token，导入后无法调模型" })
+          continue
+        }
+        try {
+          const r = upsertAccount(configDir, {
+            llmToken: a.llmToken,
+            token: a.token,
+            expire: a.expires,
+            uid: String(a.userId ?? ""),
+            phone: a.username,
+          })
+          imported.push({ username: a.username, key: r.key, created: r.created })
+        } catch (e) {
+          failed.push({ username: a.username, reason: String(e?.message ?? e) })
+        }
+      }
+      return { ok: imported.length > 0, imported, failed, accounts: await api.accounts() }
+    },
+
     async accountsDelete(input) {
       const wanted = (Array.isArray(input?.keys) ? input.keys : []).map(String).filter(Boolean)
       if (wanted.length === 0) return { ok: false, error: "没有指定要删除的账号" }
@@ -1258,6 +1330,7 @@ export function createPageServer(opts = {}) {
           "accounts/refresh": (i) => api.accountsRefresh(i),
           "models/refresh": () => api.modelsRefresh(),
           "accounts/delete": (i) => api.accountsDelete(i),
+          "accounts/from-desktop": (i) => api.accountsFromDesktop(i),
           settings: (i) => api.settingsSave(i),
           "invite/summary": () => api.summary(),
           "invite/refresh": (i) => api.summaryRefresh(i),

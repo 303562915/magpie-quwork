@@ -1146,6 +1146,44 @@ on($("refresh-all"), async () => {
 
 // T-39：模型目录缓存**只**从这里更新（`provider.models` 钩子只读缓存）。
 // 1 次 `/v1/models`（与账号数无关）；打开页面时不会自己发。
+/**
+ * 「桌面端登录态」：读取本机 QuWork 桌面客户端里已登录的账号，一键导入。
+ *
+ * 两段式：先探测（不写文件）→ 把发现列出来 → 用户确认后再写。
+ * 只读客户端目录，不碰它的 cookie / 加密密钥，也不改客户端任何文件。
+ */
+on($("import-desktop"), async () => {
+  const btn = $("import-desktop")
+  btn.disabled = true
+  try {
+    const probe = await api("/api/accounts/from-desktop", { dryRun: true })
+    if (!probe.ok) return toast(String(probe.error || "没有读到客户端登录态"), true)
+
+    const list = Array.isArray(probe.accounts) ? probe.accounts : []
+    if (list.length === 0) return toast("客户端里没有可用账号", true)
+
+    const lines = list
+      .map((x) => `${x.username}  （积分 ${fmtNum(x.quota)}${x.wechatBound ? " · 已绑微信" : ""}${x.hasModelToken ? "" : " · 无模型token"}` + "）")
+      .join("\n")
+    if (!confirm(`在本机客户端里找到 ${list.length} 个已登录账号：\n\n` + lines + "\n\n要导入到面板吗？")) return
+
+    const done = await api("/api/accounts/from-desktop", { dryRun: false })
+    if (done.ok) {
+      const n = (done.imported || []).length
+      const f = (done.failed || []).length
+      toast(`已导入 ${n} 个账号` + (f ? `，${f} 个跳过` : ""))
+      if (f) {
+        $("accounts-cache-note").textContent = "跳过：" + done.failed.map((x) => `${x.username}（${x.reason}）`).join("；")
+      }
+      await loadAccounts()
+    } else {
+      toast(String(done.error || "导入失败"), true)
+    }
+  } finally {
+    btn.disabled = false
+  }
+})
+
 on($("refresh-models"), async () => {
   setStatus("读取模型目录…")
   const d = await api("/api/models/refresh", {})

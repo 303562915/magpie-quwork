@@ -8,7 +8,7 @@
 
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import net from "node:net"
@@ -883,4 +883,69 @@ test("T26-10) index.html 有「绑定微信」按钮 + 微信小面板（两按�
   assert.ok(html.includes('id="wechat-start"'), "要有「打开微信扫码」按钮")
   assert.ok(html.includes('id="wechat-callback"'), "要能粘贴回调地址")
   assert.ok(html.includes('id="wechat-finish"'), "要有「完成绑定」按钮")
+})
+
+// ── 桌面端登录态：从本机 QuWork 客户端读凭据 ─────────────────────────────
+
+test("T-DESKTOP-1) desktopClientDirs 只返回真实存在的目录（按平台给候选）", async () => {
+  const { desktopClientDirs } = await import("../src/desktop-client.mjs")
+  const dirs = desktopClientDirs({ APPDATA: "C:\\no-such\\AppData", LOCALAPPDATA: "C:\\no-such\\Local" })
+  assert.deepEqual(dirs, [], "目录不存在时不该返回候选")
+})
+
+test("T-DESKTOP-2) readFromDesktopClient 捞 JWT/sk、去重、跳过 cookie 与 Local State", async (t) => {
+  const { readFromDesktopClient } = await import("../src/desktop-client.mjs")
+  const root = tempDir(t)
+  const dir = join(root, "qurwork-desktop")
+  mkdirSync(join(dir, "Network"), { recursive: true })
+
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjo3fQ.sig"
+  const sk = "sk-" + "a".repeat(48)
+
+  const r = readFromDesktopClient({
+    env: { APPDATA: root },
+    listFilesImpl: () => [join(dir, "a.sqlite"), join(dir, "Network", "Cookies")],
+    readFileImpl: () => Buffer.from(`|${jwt}|${sk}|${jwt}|`, "latin1"),
+  })
+  assert.equal(r.dirs.length, 1)
+  assert.equal(r.candidates.length, 2, "一个 JWT 一个 sk，重复的 JWT 要去重")
+  assert.ok(r.candidates.some((c) => c.kind === "jwt" && c.value === jwt))
+  assert.ok(r.candidates.some((c) => c.kind === "sk" && c.value === sk))
+})
+
+test("T-DESKTOP-3) verifyCandidates 只留验得通的，并按 username 去重留积分高的", async () => {
+  const { verifyCandidates } = await import("../src/desktop-client.mjs")
+  const goodLow = "eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJycnotbGxtIiwidXNlcl9pZCI6MX0.s"
+  const goodHigh = "eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJycnotbGxtIiwidXNlcl9pZCI6MX0.t"
+  const dead = "eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJycnotbGxtIiwidXNlcl9pZCI6OX0.u"
+  const fetchImpl = async (url, init) => {
+    const tok = String(new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer\s+/i, "")
+    if (tok === dead) return Response.json({ success: false, message: "bad" })
+    const quota = tok === goodHigh ? 900 : 100
+    return Response.json({ success: true, data: { id: 1, username: "13800000000", quota, wechat_bound: false } })
+  }
+  const out = await verifyCandidates({
+    candidates: [
+      { kind: "jwt", value: goodLow, source: "a" },
+      { kind: "jwt", value: goodHigh, source: "b" },
+      { kind: "jwt", value: dead, source: "c" },
+      { kind: "sk", value: "sk-" + "b".repeat(48), source: "d" },
+    ],
+    platformBaseUrl: "https://p.example",
+    fetchImpl,
+  })
+  assert.equal(out.length, 1, "同账号只留一条")
+  assert.equal(out[0].quota, 900, "留积分高的")
+})
+
+test("T-DESKTOP-4) 面板有「桌面端登录态」按钮，且走两段式（先 dryRun 再写入）", async (t) => {
+  const { base } = await startRecording(t)
+  const html = await (await fetch(`${base}/`)).text()
+  assert.match(html, /id="import-desktop"/)
+  assert.match(html, /桌面端登录态/)
+
+  const js = await (await fetch(`${base}/assets/app.js`)).text()
+  assert.match(js, /from-desktop/, "要调导入接口")
+  assert.match(js, /dryRun:\s*true/, "先探测不写文件")
+  assert.match(js, /dryRun:\s*false/, "确认后再写")
 })
