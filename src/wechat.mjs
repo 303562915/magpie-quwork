@@ -36,6 +36,7 @@ export const AUTHORIZE_URL = "https://open.weixin.qq.com/connect/qrconnect"
 /** 这些常量只是路径，别在调用点硬编码。 */
 export const WECHAT_PATHS = Object.freeze({
   oauth: "/api/oauth/wechat",
+  web: "/api/oauth/web-wechat",
   bind: "/api/user/wechat/bind",
 })
 
@@ -97,25 +98,53 @@ export function parseCallback(input) {
  */
 export async function exchangeCode(opts) {
   const platformBaseUrl = opts.platformBaseUrl
-  const qs = new URLSearchParams({
-    code: String(opts.code ?? ""),
-    platform: "qurvis",
-    state: String(opts.state ?? ""),
-  })
+  const code = String(opts.code ?? "")
+  const state = String(opts.state ?? "")
 
-  const r = await callPlatform({
-    platformBaseUrl,
-    token: "",
-    path: `${WECHAT_PATHS.oauth}?${qs.toString()}`,
-    method: "GET",
-    fetchImpl: opts.fetchImpl,
-  })
+  /**
+   * 先在**多个候选接口**里找 `wechat_token`。
+   *
+   * ⚠ 顺序很关键：`code` 是**一次性**的，第一个吃下它的接口就把它用掉了。
+   *   真机上 `/api/oauth/wechat` 返回的是**登录**载荷（token/user，没有 wechat_token），
+   *   所以不能把它排第一 —— 一旦它吃掉 code，后面就再也换不出绑定凭证。
+   *
+   *   候选（按「更像绑定」优先）：
+   *	① `/api/oauth/web-wechat?code&state` —— 平台网页端用的那条，按 state 找账号
+   *	② `/api/oauth/wechat?code&platform=qurvis&state` —— 经典登录/换取接口
+   *
+   * 两条都试过仍没有 `wechat_token` 时，把**两边的原始返回**都带回去，
+   * 这样日志里能直接看出平台到底给了什么（不用再猜）。
+   */
+  const attempts = []
+  const raws = {}
 
-  if (!r.ok) return { ok: false, message: r.message }
-  const d = r.data?.data ?? r.data ?? {}
-  const wechatToken = String(d.wechat_token ?? d.wechatToken ?? "").trim()
-  if (!wechatToken) return { ok: false, message: r.data?.message || "微信未返回 wechat_token" }
-  return { ok: true, wechatToken }
+  const tryOne = async (label, path, qs) => {
+    const r = await callPlatform({
+      platformBaseUrl,
+      token: "",
+      path: `${path}?${qs.toString()}`,
+      method: "GET",
+      fetchImpl: opts.fetchImpl,
+    })
+    const d = r.data?.data ?? r.data ?? {}
+    const wechatToken = String(d.wechat_token ?? d.wechatToken ?? "").trim()
+    raws[label] = { ok: r.ok, message: r.message ?? "", keys: Object.keys(d ?? {}).slice(0, 20) }
+    attempts.push({ label, ok: r.ok, gotToken: Boolean(wechatToken), message: r.message ?? "" })
+    return { ok: r.ok, wechatToken, data: d, message: r.message }
+  }
+
+  // ① 网页端那条（按 state 找账号，最可能给 wechat_token）
+  const web = new URLSearchParams({ code, state })
+  const webR = await tryOne("web-wechat", WECHAT_PATHS.web, web)
+  if (webR.ok && webR.wechatToken) return { ok: true, wechatToken: webR.wechatToken, via: "web-wechat", attempts, raws }
+
+  // ② 经典换取接口（可能是登录，但也要试）
+  const qs = new URLSearchParams({ code, platform: "qurvis", state })
+  const oauthR = await tryOne("oauth/wechat", WECHAT_PATHS.oauth, qs)
+  if (oauthR.ok && oauthR.wechatToken) return { ok: true, wechatToken: oauthR.wechatToken, via: "oauth/wechat", attempts, raws }
+
+  const msg = oauthR.message || webR.message || "两个接口都没返回 wechat_token"
+  return { ok: false, message: msg, attempts, raws }
 }
 
 /**

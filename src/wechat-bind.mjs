@@ -481,6 +481,7 @@ export function createBindPortal(opts) {
       }
 
       const ex = await exchangeCode({ code: r.code, state: session.state, platformBaseUrl, fetchImpl })
+      session.exchangeDebug = { attempts: ex.attempts, raws: ex.raws, via: ex.via }
       if (!ex.ok) {
         session.scanError = `换 wechat_token 失败：${ex.message}`
         session.status = "expired"
@@ -987,6 +988,7 @@ export function createBindPortal(opts) {
           released: true,
           scanState: s.scanState ?? "expired",
           message: s.scanError || "这次的码已失效，请重新扫码",
+          ...(s.exchangeDebug ? { debug: s.exchangeDebug } : {}),
         }
       }
 
