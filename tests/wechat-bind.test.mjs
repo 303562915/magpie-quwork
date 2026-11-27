@@ -51,6 +51,8 @@ function tempDir(t) {
 function fakePlatform(opts = {}) {
   const bound = opts.bound ?? new Set()
   const dead = opts.dead ?? new Set()
+  /** token → 注册时间（秒）；不传则不给这个字段 */
+  const createdTimes = opts.createdTime ?? {}
   const calls = []
   /** 每次 `/api/oauth/wechat/url` 返回的那条授权 URL（测试用来核对页面里的二维码）。 */
   const urls = []
@@ -74,6 +76,7 @@ function fakePlatform(opts = {}) {
           wechat_bound: bound.has(token),
           wechat_id: bound.has(token) ? "wx-openid-1" : "",
           aff_code: "953240",
+          ...(createdTimes[token] ? { created_time: createdTimes[token] } : {}),
         },
       })
     }
@@ -953,4 +956,25 @@ test("§34c exchangeCode：bind_type=bind → 视为绑定成功", async () => {
   const r = await exchangeCode({ platformBaseUrl: "https://p.example", code: "C3", state: "s", fetchImpl })
   assert.equal(r.ok, true)
   assert.equal(r.alreadyBoundOk, true)
+})
+
+// ── ㉟ 注册时间 / 今天 / 24h 内可补邀请 ──────────────────────────────────
+
+test("§35 poolOverview 带 createdTime、registeredToday、inviteEligible", async (t) => {
+  const dir = seed(t)
+  const nowSec = Math.floor(Date.now() / 1000)
+  const platform = fakePlatform({ createdTime: { "tok-aaa": nowSec, "tok-bbb": nowSec - 3 * 86400 } })
+  const portal = createBindPortal({ configDir: dir, platformBaseUrl: PLATFORM, fetchImpl: platform.fetchImpl })
+  await portal.sync()
+
+  const ov = portal.overview()
+  const a = ov.accounts.find((x) => x.key === "quwork")
+  const b = ov.accounts.find((x) => x.key === "quwork#1")
+  assert.equal(a.createdTime, nowSec)
+  assert.equal(a.registeredToday, true, "今天注册的要标出来")
+  assert.equal(a.inviteEligible, true, "24h 内可补邀请")
+  assert.equal(b.registeredToday, false)
+  assert.equal(b.inviteEligible, false)
+  assert.equal(ov.todayCount, 1)
+  assert.equal(ov.inviteEligible, 1)
 })

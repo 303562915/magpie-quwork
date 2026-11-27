@@ -1059,10 +1059,20 @@ function bindStateCell(a) {
 }
 
 function renderBind(data) {
-  const accounts = Array.isArray(data?.accounts) ? data.accounts : []
+  // 记下最近一次数据：切换筛选时直接重绘，不用再打一次上游
+  state.bindData = data
+  const allAccounts = Array.isArray(data?.accounts) ? data.accounts : []
+  const filter = $("bind-filter")?.value || "all"
+  const accounts = allAccounts.filter((x) => {
+    if (filter === "today") return x.registeredToday === true
+    if (filter === "24h") return x.inviteEligible === true
+    return true
+  })
   $("bind-summary").textContent =
-    `共 ${data?.total ?? accounts.length} · 已绑 ${data?.bound ?? 0} · 可分配 ${data?.available ?? 0}` +
-    (data?.broken ? ` · 失效 ${data.broken}` : "")
+    `共 ${data?.total ?? allAccounts.length} · 已绑 ${data?.bound ?? 0} · 可分配 ${data?.available ?? 0}` +
+    (data?.broken ? ` · 失效 ${data.broken}` : "") +
+    (data?.todayCount ? ` · 今天注册 ${data.todayCount}` : "") +
+    (data?.inviteEligible ? ` · 可补邀请 ${data.inviteEligible}` : "")
   $("bind-note").textContent = data?.updatedAt ? `快照：${fmtAgo(data.updatedAt)}` : "还没有快照，点「刷新全部账号状态」"
 
   $("bind-body").innerHTML = accounts.length
@@ -1073,7 +1083,11 @@ function renderBind(data) {
             <td>${esc(a.label ?? a.key)}</td>
             <td><span class="pill ${st.cls}">${esc(st.text)}</span></td>
             <td>${fmtNum(a.quota)}</td>
-            <td>${a.checkedAt ? fmtAgo(a.checkedAt) : "—"}</td>
+            <td>
+              ${a.createdTime ? esc(new Date(a.createdTime * 1000).toLocaleDateString("zh-CN")) : "—"}
+              ${a.registeredToday ? '<span class="pill ok">今天</span>' : ""}
+              ${a.inviteEligible && !a.registeredToday ? '<span class="pill">24h内</span>' : ""}
+            </td>
             <td class="row-actions">
               ${a.wechatBound ? '<span class="muted">—</span>' : `<button class="tiny primary bind-qr-btn" data-key="${esc(a.key)}" data-label="${esc(a.label ?? a.key)}">出码</button>`}
             </td>
@@ -1117,6 +1131,11 @@ async function refreshBindQr() {
 }
 
 on($("bind-refresh"), loadBindPool)
+
+// 只换筛选条件时不必再打上游：用最近一次数据重绘即可
+on($("bind-filter"), () => {
+  if (state.bindData) renderBind(state.bindData)
+})
 
 /**
  * 「扫码绑定」页每行的「出码」：就地展开该号的绑定二维码 + 粘贴回调完成绑定。

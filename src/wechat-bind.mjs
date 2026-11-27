@@ -157,6 +157,7 @@ export async function fetchSelf(opts) {
     inviteCode: String(d.aff_code ?? ""),
     quota: Number(d.quota) || 0,
     phone: String(d.phone ?? d.display_name ?? ""),
+    createdTime: Number(d.created_time) || 0,
   }
 }
 
@@ -261,6 +262,8 @@ export async function refreshPool(opts) {
         continue
       }
       const self = await fetchSelf({ platformBaseUrl: opts?.platformBaseUrl, token: item.token, fetchImpl: opts?.fetchImpl })
+      // 记下平台给的注册时间（秒）：面板要据此区分「今天注册的号」
+      const selfCreatedTime = Number(self.createdTime) > 0 ? Number(self.createdTime) : 0
       if (!self.ok) {
         // 只有「凭据被拒」才算 token 失效；超时 / 5xx 只是这次没读到，别把它永久踢出池子
         const authFailed = self.status === 401 || self.status === 403
@@ -279,6 +282,7 @@ export async function refreshPool(opts) {
         wechatBound: self.wechatBound,
         wechatId: self.wechatId,
         quota: self.quota,
+        createdTime: self.createdTime,
         checkedAt: now(),
         tokenInvalid: false,
       }
@@ -304,6 +308,22 @@ export async function refreshPool(opts) {
  *
  * @param {{configDir: string}} opts
  */
+/** 这个时间戳（秒）是不是**本机今天**。 */
+function isToday(seconds) {
+  const t = Number(seconds) || 0
+  if (t <= 0) return false
+  const d = new Date(t * 1000)
+  const n = new Date()
+  return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate()
+}
+
+/** 这个时间戳（秒）是否还在注册后 24 小时内（邀请码只认这个窗口）。 */
+function isWithin24h(seconds) {
+  const t = Number(seconds) || 0
+  if (t <= 0) return false
+  return Date.now() - t * 1000 <= 24 * 60 * 60 * 1000
+}
+
 export function poolOverview(opts) {
   const keys = listPoolTokens(opts?.configDir).map((a) => a.key)
   const pool = readPool(opts?.configDir)
@@ -316,6 +336,10 @@ export function poolOverview(opts) {
       tokenInvalid: a.tokenInvalid === true,
       quota: Number.isFinite(a.quota) ? a.quota : null,
       checkedAt: Number(a.checkedAt) || 0,
+      createdTime: Number(a.createdTime) || 0,
+      registeredToday: isToday(a.createdTime),
+      // 邀请码只认「注册 24 小时内」，所以这两个标记要分开给
+      inviteEligible: isWithin24h(a.createdTime),
       error: a.error ? String(a.error) : undefined,
     }
   })
@@ -323,6 +347,8 @@ export function poolOverview(opts) {
   const bound = list.filter((a) => a.wechatBound).length
   const broken = list.filter((a) => a.tokenInvalid).length
   const available = list.filter((a) => !a.wechatBound && !a.tokenInvalid).length
+  const todayCount = list.filter((a) => a.registeredToday).length
+  const inviteEligible = list.filter((a) => a.inviteEligible && !a.wechatBound).length
 
   return {
     ok: true,
@@ -332,6 +358,8 @@ export function poolOverview(opts) {
     bound,
     broken,
     available,
+    todayCount,
+    inviteEligible,
     accounts: list,
   }
 }

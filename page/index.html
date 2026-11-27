@@ -287,6 +287,11 @@
         <div class="toolbar">
           <div class="toolbar-actions">
             <button id="bind-refresh">读取池子状态</button>
+            <select id="bind-filter" class="field-input" style="max-width:190px">
+              <option value="all">全部未绑</option>
+              <option value="today">今天注册</option>
+              <option value="24h">24h 内（可补邀请）</option>
+            </select>
             <button id="bind-sync" class="primary">刷新全部账号状态</button>
             <button id="bind-release" class="danger">清掉空闲占用</button>
             <button id="bind-release-all" class="danger">全部强制清掉</button>
@@ -302,7 +307,7 @@
         <div class="table-wrap">
           <table id="bind-table">
             <thead>
-              <tr><th>账号</th><th>微信</th><th>平台积分</th><th>检查时间</th><th>操作</th></tr>
+              <tr><th>账号</th><th>微信</th><th>平台积分</th><th>注册时间</th><th>操作</th></tr>
             </thead>
             <tbody id="bind-body">
               <tr><td colspan="5"><div class="empty">加载中…</div></td></tr>
