@@ -1250,6 +1250,33 @@ export function createPageServer(opts = {}) {
 
         // 阵列页补号：某一格的号被收回（5 分钟没人扫）后，前端立刻要一个新号，页面不用刷新
         // 指定账号出码（面板里点某个号 → 直接显示它的绑定二维码 / 链接）
+        // 批量出码：一次给多个号各出一张**真码**（与单号「出码」完全同一条链路）
+        if (isGet && rest === "/api/qr-batch") {
+          const raw = String(url.searchParams.get("keys") ?? "").trim()
+          const keys = raw ? raw.split(",").map((x) => x.trim()).filter(Boolean) : []
+          if (keys.length === 0) return sendAdminJson(res, 200, { ok: false, error: "没有指定账号" }, req, { head: isHead })
+          if (keys.length > 12) return sendAdminJson(res, 200, { ok: false, error: "一次最多 12 个" }, req, { head: isHead })
+
+          const cards = []
+          const failed = []
+          for (const k of keys) {
+            const one = await bindPortal.prepareScan(k)
+            if (one.ok) {
+              cards.push({
+                key: one.key,
+                label: one.label,
+                sessionId: one.sessionId,
+                confirmUrl: one.confirmUrl,
+                qr: one.qr,
+                ttlMs: one.ttlMs,
+              })
+            } else {
+              failed.push({ key: k, error: one.message ?? one.reason ?? "出码失败" })
+            }
+          }
+          return sendAdminJson(res, 200, { ok: cards.length > 0, cards, failed }, req, { head: isHead })
+        }
+
         if (isGet && rest === "/api/qr") {
           if (!bindPortal.authorize(req)) return sendAdminJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" }, req, { head: isHead })
           const key = String(url.searchParams.get("key") ?? "").trim()

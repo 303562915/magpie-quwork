@@ -1043,3 +1043,13 @@ test("T-BINDFILTER-1) 扫码绑定页默认筛选是「24h 内（可补邀请）
   assert.match(js, /\|\| "24h"/, "JS 兜底也必须是 24h")
   assert.match(js, /邀请码只认这个窗口/, "空态要解释清楚")
 })
+
+test("T-BATCH-1) 面板有「批量出码」按钮与网格容器，走 /bind/api/qr-batch", async (t) => {
+  const { base } = await startRecording(t)
+  const html = await (await fetch(`${base}/`)).text()
+  assert.match(html, /id="bind-batch"/, "要有批量出码按钮")
+  assert.match(html, /id="bind-batch-codes"/, "要有结果容器")
+  const js = await (await fetch(`${base}/assets/app.js`)).text()
+  assert.match(js, /bind\/api\/qr-batch/, "要走批量出码接口")
+  assert.match(js, /prepareScan|qr-batch/, "与单号出码同源")
+})

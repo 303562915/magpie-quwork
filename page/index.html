@@ -292,7 +292,8 @@
               <option value="today">今天注册</option>
               <option value="all">全部未绑</option>
             </select>
-            <button id="bind-sync" class="primary">刷新全部账号状态</button>
+            <button id="bind-batch" class="primary">批量出码（选中项）</button>
+            <button id="bind-sync">刷新全部账号状态</button>
             <button id="bind-release" class="danger">清掉空闲占用</button>
             <button id="bind-release-all" class="danger">全部强制清掉</button>
             <a id="bind-open" class="muted" href="#" target="_blank" rel="noreferrer">打开门户页</a>
@@ -305,6 +306,8 @@
         </div>
 
         <div class="table-wrap">
+        <div id="bind-batch-codes" class="bind-codes" hidden></div>
+
           <table id="bind-table">
             <thead>
               <tr><th>账号</th><th>微信</th><th>平台积分</th><th>注册时间</th><th>操作</th></tr>

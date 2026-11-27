@@ -1154,6 +1154,107 @@ async function refreshBindQr() {
 on($("bind-refresh"), loadBindPool)
 
 // 只换筛选条件时不必再打上游：用最近一次数据重绘即可
+/**
+ * 批量出码：给选中的（或当前筛选里前 N 个）账号各出一张**真码**。
+ *
+ * 与单号「出码」走的是同一个 `prepareScan` —— 出的是 confirm?uuid= 的真码，
+ * 后台自动监听扫码并完成绑定。区别只是这里一次出多张，方便截图/复制链接发出去。
+ */
+on($("bind-batch"), async () => {
+  const btn = $("bind-batch")
+  const box = $("bind-batch-codes")
+  const labels = String(btn.textContent || "")
+
+  // 选中优先；没选就用当前筛选结果的前 6 个
+  let keys = [...(state.selected || [])].filter((k) => /^quwork(#\d+)?$/.test(k))
+  if (keys.length === 0) {
+    const data = Array.isArray(state.bindData?.accounts) ? state.bindData.accounts : []
+    const filter = $("bind-filter")?.value || "24h"
+    const pool = data.filter((x) => {
+      if (x.wechatBound || x.tokenInvalid) return false
+      if (filter === "today") return x.registeredToday === true
+      if (filter === "24h") return x.inviteEligible === true
+      return true
+    })
+    keys = pool.slice(0, 6).map((x) => x.key)
+  }
+  if (keys.length === 0) {
+    await askDialog({
+      title: "没有可出码的账号",
+      body: "先在表格里勾选账号，或者把筛选切到「全部未绑」再点批量出码。",
+      okText: "知道了",
+      cancelText: "关闭",
+    })
+    return
+  }
+  if (keys.length > 12) keys = keys.slice(0, 12)
+
+  btn.disabled = true
+  btn.textContent = "出码中…"
+  try {
+    const d = await api("/bind/api/qr-batch?keys=" + encodeURIComponent(keys.join(",")))
+    if (!d.ok) {
+      await askDialog({ title: "出码失败", body: String(d.error || (d.failed ?? []).map((f) => f.key + ": " + f.error).join("\n") || "未知原因"), okText: "知道了", cancelText: "关闭" })
+      return
+    }
+
+    box.hidden = false
+    box.innerHTML = (d.cards ?? [])
+      .map(
+        (c, i) => `<div class="code-card" data-i="${i}">
+        <div class="lb">${esc(c.label)}</div>
+        <img src="${esc(c.qr || "")}" alt="${esc(c.label)}">
+        <button class="tiny" data-code-act="copy" data-i="${i}">复制链接</button>
+        <div class="st" data-code-st="${i}">等待扫码…</div>
+      </div>`,
+      )
+      .join("")
+
+    // 复制 + 每张独立轮询状态
+    box.querySelectorAll('[data-code-act="copy"]').forEach((b) => {
+      b.addEventListener("click", async () => {
+        const c = (d.cards ?? [])[Number(b.dataset.i)]
+        try {
+          await navigator.clipboard.writeText(String(c?.confirmUrl ?? ""))
+          toast("扫码链接已复制")
+        } catch {
+          toast("复制失败，请手动复制", true)
+        }
+      })
+    })
+    for (const [i, c] of (d.cards ?? []).entries()) {
+      let alive = true
+      const tick = async () => {
+        if (!alive) return
+        const el = box.querySelector('[data-code-st="' + i + '"]')
+        if (!el) return
+        try {
+          const st = await api("/bind/api/check?session=" + encodeURIComponent(c.sessionId))
+          if (st.status === "bound") {
+            alive = false
+            el.textContent = "✅ 已绑定"
+            void loadAccounts()
+            return
+          }
+          if (st.status === "expired") {
+            alive = false
+            el.textContent = "⏳ 已过期"
+            return
+          }
+          el.textContent =
+            st.scanState === "scanned" ? "👀 已扫码待确认" : st.scanState === "confirmed" ? "⏳ 正在绑定…" : `等待扫码…${Math.round((st.remainingMs || 0) / 1000)}s`
+        } catch {}
+        if (alive) setTimeout(tick, 3000)
+      }
+      setTimeout(tick, 2000)
+    }
+    toast(`已出 ${(d.cards ?? []).length} 张码`)
+  } finally {
+    btn.disabled = false
+    btn.textContent = labels
+  }
+})
+
 on($("bind-filter"), () => {
   if (state.bindData) renderBind(state.bindData)
 })
