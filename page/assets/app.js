@@ -232,7 +232,6 @@ function renderAccounts(data) {
         <td>${a.models == null ? "—" : fmtNum(a.models)}</td>
         <td class="row-actions">
           <button class="tiny" data-act="refresh" data-key="${esc(a.key)}">刷新</button>
-          <button class="tiny" data-act="qr" data-key="${esc(a.key)}">出码</button>
           <button class="tiny" data-act="copy" data-key="${esc(a.key)}">复制 token</button>
           ${st.text === "需绑微信" ? `<button class="tiny primary" data-act="wechat" data-key="${esc(a.key)}">绑定微信</button>` : ""}
           <button class="tiny danger" data-act="delete" data-key="${esc(a.key)}">删除</button>
@@ -1007,7 +1006,9 @@ function renderBind(data) {
             <td><span class="pill ${st.cls}">${esc(st.text)}</span></td>
             <td>${fmtNum(a.quota)}</td>
             <td>${a.checkedAt ? fmtAgo(a.checkedAt) : "—"}</td>
-            <td class="muted">${esc(a.error ?? "")}</td>
+            <td class="row-actions">
+              ${a.wechatBound ? '<span class="muted">—</span>' : `<button class="tiny primary bind-qr-btn" data-key="${esc(a.key)}" data-label="${esc(a.label ?? a.key)}">出码</button>`}
+            </td>
           </tr>`
         })
         .join("")
@@ -1048,6 +1049,16 @@ async function refreshBindQr() {
 }
 
 on($("bind-refresh"), loadBindPool)
+
+/**
+ * 「扫码绑定」页每行的「出码」：就地展开该号的绑定二维码 + 粘贴回调完成绑定。
+ * 这一页就是管「谁还没绑、怎么绑」，出码 / 查状态 / 粘回调放同一处。
+ */
+$("bind-body")?.addEventListener("click", (e) => {
+  const btn = e.target instanceof HTMLButtonElement ? e.target.closest(".bind-qr-btn") : null
+  if (!btn) return
+  return showQrRow(btn, btn.dataset.key)
+})
 
 on($("bind-save-public"), async () => {
   const v = String($("bind-public").value ?? "").trim()

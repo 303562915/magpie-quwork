@@ -376,6 +376,19 @@ export function createPageServer(opts = {}) {
    * 内存即可（重启丢失 = 重新扫码），10 分钟内有效、用后即焚。
    */
   const wechatStates = new Map()
+
+  /**
+   * 绑定流程的监听日志（最近 300 条，只在内存里）。
+   *
+   * 真绑定是「扫码人给 code → 换 wechat_token → POST /api/user/wechat/bind」，
+   * 每一步都可能失败（code 过期 / 已被用 / 平台拒绝同一微信绑多号）。
+   * 没有这份日志，界面上只剩一句「绑定失败」，没法定位到底是哪一步。
+   */
+  const bindLog = []
+  const pushBindLog = (row) => {
+    bindLog.push({ at: new Date(now()).toISOString(), ...row })
+    while (bindLog.length > 300) bindLog.shift()
+  }
   const WECHAT_STATE_TTL_MS = 10 * 60 * 1000
 
   /** 面板自己的 JSON 文件（都在 magpie 配置目录里）。 */
@@ -964,10 +977,19 @@ export function createPageServer(opts = {}) {
       const token = tokenOfKey(key || issued.key)
       if (!token) return { ok: false, error: "没有平台 token，无法绑定微信" }
 
+      // ── 监听：真绑定的每一步都落一行日志（回答「到底卡在哪一步」）──
+      const obs = (step, extra) => pushBindLog({ step, key: key || issued.key, state, ...extra })
+      obs("finish:start", { codeLen: code.length })
+
       const ex = await exchangeCode({ code, state, platformBaseUrl, fetchImpl })
-      if (!ex.ok) return { ok: false, error: ex.message }
+      if (!ex.ok) {
+        obs("exchange:fail", { message: ex.message })
+        return { ok: false, error: ex.message }
+      }
+      obs("exchange:ok", { wechatTokenLen: String(ex.wechatToken ?? "").length })
 
       const r = await bindWechat({ platformBaseUrl, token, wechatToken: ex.wechatToken, fetchImpl })
+      obs(r.ok ? "bind:ok" : "bind:fail", { message: r.message })
       if (!r.ok) return { ok: false, error: r.message }
 
       // 绑定成功后把该账号的签到缓存标成「不再是需绑微信」
@@ -1247,6 +1269,8 @@ export function createPageServer(opts = {}) {
           "benefit/redeem": (i) => api.redeem(i),
           "wechat/start": (i) => api.wechatStart(i),
           "wechat/finish": (i) => api.wechatFinish(i),
+        // 绑定流程的监听日志（最近 300 条）：回答「扫码人到底走到哪一步」
+        "wechat/log": () => ({ ok: true, entries: bindLog }),
         }
         const fn = table[name]
         if (!fn) return json(404, { ok: false, error: "未知接口" })
