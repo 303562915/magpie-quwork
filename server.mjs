@@ -1142,16 +1142,19 @@ export function createPageServer(opts = {}) {
           const cards = []
           const seen = new Set()
           for (let i = 0; i < want; i += 1) {
-            const r = await bindPortal.allocate()
+            // ⚠ 必须走 prepareScan：它出的是「微信真正要扫的 confirm?uuid= 码」，
+            //   并在后台监听扫码、自动换 wechat_token 完成绑定。
+            //   allocate() 是旧链路（把 qrconnect 页面地址编成码），扫了只会登录、绑不上。
+            const r = await bindPortal.prepareScan()
             if (!r.ok || seen.has(r.key)) break
             seen.add(r.key)
-            let qrDataUri = ""
-            try {
-              qrDataUri = `data:image/png;base64,${qrPng(r.authorizeUrl, { ecl: "L", scale: 6, border: 3 }).toString("base64")}`
-            } catch {
-              qrDataUri = ""
-            }
-            cards.push({ sessionId: r.sessionId, label: r.label, qrDataUri, ttlMs: r.ttlMs })
+            cards.push({
+              sessionId: r.sessionId,
+              label: r.label,
+              qrDataUri: r.qr || "",
+              url: r.confirmUrl || "",
+              ttlMs: r.ttlMs,
+            })
           }
           const ov = bindPortal.overview()
           return sendHtml(
@@ -1167,18 +1170,17 @@ export function createPageServer(opts = {}) {
           if (!allowAllocate(clientIp(req))) {
             return sendHtml(res, errorPage("操作太快了，请等几秒再扫一次", { mount }), { head: isHead, pna, status: 200 })
           }
-          const r = await bindPortal.allocate()
+          // 单号页同样走正确链路（prepareScan 会自动挑一个未绑的号；
+          // 它出的是 confirm?uuid= 的真码，并在后台监听扫码自动绑定）
+          const r = await bindPortal.prepareScan()
           if (!r.ok) {
             const html =
               r.reason === "no-account" ? noAccountPage({ mount }) : errorPage(String(r.message ?? ""), { mount })
             return sendHtml(res, html, { head: isHead, pna, status: 200 })
           }
-          let qrDataUri = ""
-          try {
-            // ECC L：授权地址约 200 字节，10 版 L 级到 271 字节，留足余量
-            qrDataUri = `data:image/png;base64,${qrPng(r.authorizeUrl, { ecl: "L", scale: 8, border: 4 }).toString("base64")}`
-          } catch (e) {
-            log?.warn?.(`quwork bind: 二维码生成失败: ${String(e?.message ?? e).slice(0, 120)}`)
+          const qrDataUri = r.qr || ""
+          if (!qrDataUri) {
+            log?.warn?.("quwork bind: 二维码为空（prepareScan 没给图）")
             return sendHtml(res, errorPage("二维码生成失败", { mount }), { head: isHead, pna, status: 200 })
           }
           return sendHtml(
@@ -1187,7 +1189,7 @@ export function createPageServer(opts = {}) {
               sessionId: r.sessionId,
               label: r.label,
               qrDataUri,
-              authorizeUrl: r.authorizeUrl,
+              authorizeUrl: r.confirmUrl || r.authorizeUrl || "",
               ttlMs: r.ttlMs,
               mount,
             }),
@@ -1248,15 +1250,16 @@ export function createPageServer(opts = {}) {
           const want = Math.max(1, Math.min(6, Number(url.searchParams.get("n")) || 1))
           const cards = []
           for (let i = 0; i < want; i += 1) {
-            const r = await bindPortal.allocate()
+            // 换码同样必须是「真码」：confirm?uuid= + 后台监听
+            const r = await bindPortal.prepareScan()
             if (!r.ok) break
-            let qrDataUri = ""
-            try {
-              qrDataUri = `data:image/png;base64,${qrPng(r.authorizeUrl, { ecl: "L", scale: 6, border: 3 }).toString("base64")}`
-            } catch {
-              qrDataUri = ""
-            }
-            cards.push({ sessionId: r.sessionId, label: r.label, qrDataUri, ttlMs: r.ttlMs })
+            cards.push({
+              sessionId: r.sessionId,
+              label: r.label,
+              qrDataUri: r.qr || "",
+              url: r.confirmUrl || "",
+              ttlMs: r.ttlMs,
+            })
           }
           return json(200, { ok: cards.length > 0, cards })
         }

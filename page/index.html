@@ -107,7 +107,7 @@
             <span id="wechat-note" class="status" role="status"></span>
           </div>
           <p class="hint">
-            扫码后微信会跳回 <code>llm.rrzu.com/oauth/wechat?code=…</code>：把浏览器地址栏**整段**粘到上面。
+            扫码后微信会跳回 <code>llm.rrzu.com/oauth/wechat?code=…</code>：把浏览器地址栏<strong>整段</strong>粘到上面。
             redirect_uri 必须是已备案域名，所以没法直接跳回本机。
           </p>
         </div>
@@ -316,21 +316,25 @@
         </div>
 
         <div class="toolbar" style="margin-top:14px">
-          <label class="field" style="flex:1 1 260px">固定码里的公网地址
-            <input id="bind-public" class="field-input" placeholder="https://bind.example.com（留空 = 用当前面板地址）">
+          <label class="field" style="flex:1 1 260px">阵列页 / 出码页用的公网地址
+            <input id="bind-public" class="field-input" placeholder="https://xxx.trycloudflare.com（留空 = 用当前面板地址）">
           </label>
-          <button id="bind-save-public" class="primary">保存并刷新二维码</button>
+          <button id="bind-save-public" class="primary">保存并刷新</button>
           <span id="bind-public-note" class="status" role="status"></span>
         </div>
-        <p class="hint">改这里**不用重启 magpie**（存在 <code>quwork-panel-settings.json</code>，优先级低于环境变量 <code>QUWORK_BIND_PUBLIC_URL</code>）。</p>
-        <p class="hint">打印用大图：<a id="bind-print" href="#" target="_blank" rel="noreferrer">1024px 版本</a>（<code>?scale=16</code>）。</p>
 
-        <div class="toolbar" style="margin-top:14px">
-          <img id="bind-qr" alt="固定二维码" width="180" height="180" style="border-radius:10px;background:#fff">
-          <div>
-            <p class="hint">这张二维码指向 <code id="bind-target">/bind/go</code>，<strong>图案永远不变</strong>：可以印出来、群发、发给任意多人。每人扫它，网页自动挑一个还没绑微信的账号，显示该账号专属的授权码，对方扫码并点「确认登录」后平台自己完成绑定。</p>
-            <p class="hint">账号池来自本机 <code>plugin-auth.json</code> 里的 quwork 条目；这个页面只显示编号，不显示手机号和 token。</p>
-            <p class="hint">下面这张码里的地址取<strong>面板服务地址</strong>。要印成公网二维码，先设环境变量 <code>QUWORK_BIND_PUBLIC_URL=https://你的域名</code>（并把 <code>/bind</code> 反代出去），再点一次「读取池子状态」刷新图片。</p>
+        <div class="toolbar" style="margin-top:10px">
+          <div style="flex:1 1 320px">
+            <p class="hint">公网链接（发这个就行，不用二维码）：
+              <a id="bind-url-public" class="mono" href="#" target="_blank" rel="noreferrer">—</a>
+            </p>
+            <p class="hint">本地链接（同一台机器上用）：
+              <a id="bind-url-local" class="mono" href="#" target="_blank" rel="noreferrer">—</a>
+            </p>
+          </div>
+          <div class="toolbar-actions">
+            <button id="bind-copy-public">复制公网链接</button>
+            <button id="bind-copy-local">复制本地链接</button>
           </div>
         </div>
       </div>

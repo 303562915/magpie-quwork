@@ -80,6 +80,22 @@ function fakePlatform(opts = {}) {
         },
       })
     }
+    // 授权页与官方二维码图（prepareScan 要拿 uuid 才能出「真码」）
+    if (u.host === "open.weixin.qq.com" && u.pathname === "/connect/qrconnect") {
+      seq += 1
+      return new Response(`<html><script>var uuid="FAKEUUID${String(seq).padStart(8, "0")}";</script></html>`, {
+        headers: { "content-type": "text/html" },
+      })
+    }
+    if (u.host === "open.weixin.qq.com" && u.pathname.startsWith("/connect/qrcode/")) {
+      return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...new Uint8Array(200)]), {
+        headers: { "content-type": "image/png" },
+      })
+    }
+    if (u.host === "lp.open.weixin.qq.com" || u.pathname === "/connect/l/qrconnect") {
+      return new Response("window.wx_errcode=408;window.wx_code='';")
+    }
+
     if (u.pathname === "/api/oauth/wechat/url") {
       seq += 1
       const state = `state-${seq}-${token.slice(-4)}`
@@ -166,21 +182,26 @@ test("§3 GET /bind/go 打一次实测 + 一次取授权地址，出二维码且
   const html = await resp.text()
 
   assert.equal(resp.status, 200)
-  // ① 实测这个号绑没绑（防止把早就绑过的号发出去）② 取这个号的授权地址
-  assert.deepEqual(
-    platform.calls.map((c) => c.path),
-    ["/api/user/self", "/api/oauth/wechat/url"],
+  // 平台接口只该打两次：① 实测这个号绑没绑（防止把早就绑过的号发出去）② 取授权地址
+  const apiPaths = platform.calls.map((c) => c.path).filter((p) => p.startsWith("/api/"))
+  assert.deepEqual(apiPaths, ["/api/user/self", "/api/oauth/wechat/url"])
+  assert.ok(
+    platform.calls.filter((c) => c.path.startsWith("/api/")).every((c) => c.token === "tok-aaa"),
+    "应该用第一个未绑账号的 token",
   )
-  assert.ok(platform.calls.every((c) => c.token === "tok-aaa"), "应该用第一个未绑账号的 token")
 
-  assert.match(html, /data:image\/png;base64,/, "页面要有二维码图")
+  // 新链路（HAR 修复后）：要打开授权页取 uuid，再把 **confirm?uuid=** 编成真码。
+  // 以前的实现是把 qrconnect 页面地址直接编码 —— 扫码只会登录，绑不上，已废弃。
+  assert.ok(platform.calls.some((c) => c.path === "/connect/qrconnect"), "要打开授权页取 uuid")
+  assert.ok(
+    platform.calls.some((c) => c.path.startsWith("/connect/qrcode/")),
+    "要取微信官方的二维码图",
+  )
+
+  assert.match(html, /data:image\//, "页面要有二维码图")
   assert.match(html, /待绑定账号 #1/)
   assert.match(html, /确认登录/)
-  // 授权链接现在**只**编码在二维码里（页面上不再给「点这里打开」的按钮），
-  // 所以用同一个编码器把预期 URL 编一遍，看页面里是不是那一张。
   assert.ok(platform.urls.length === 1, "平台应只被要过一次授权地址")
-  const expectedQr = qrPng(platform.urls[0], { ecl: "L", scale: 8, border: 4 }).toString("base64")
-  assert.ok(html.includes(expectedQr), "页面里的二维码必须就是平台签发的那条授权 URL")
   assert.ok(!html.includes(PHONE_A), "出码页不能出现手机号")
 })
 
@@ -484,7 +505,8 @@ test("§14 refreshPool：每个账号用自己的 token 读 /api/user/self", asy
 test("§16 面板 page 里有绑定 tab 与固定码预览，app.js 里有对应渲染", () => {
   const root = new URL("../", import.meta.url)
   const html = readFileSync(new URL("page/index.html", root), "utf8")
-  for (const id of ["tab-bind", "pane-bind", "bind-body", "bind-sync", "bind-qr", "bind-summary"]) {
+  // bind-qr（二维码预览）已按用户要求换成「公网/本地链接」区
+  for (const id of ["tab-bind", "pane-bind", "bind-body", "bind-sync", "bind-summary", "bind-filter", "bind-url-public", "bind-url-local"]) {
     assert.ok(html.includes(`id="${id}"`), `面板 HTML 缺 ${id}`)
   }
 
@@ -492,6 +514,8 @@ test("§16 面板 page 里有绑定 tab 与固定码预览，app.js 里有对应
   assert.ok(js.includes('"bind"]'), "TABS 里要有 bind")
   assert.ok(js.includes("loadBindPool"), "要有 loadBindPool")
   assert.ok(js.includes("/bind/api/pool"), "池子状态要读 /bind/api/pool")
+  assert.ok(js.includes("state.bindPublicUrl"), "要显示公网链接")
+  assert.ok(js.includes("state.bindLocalUrl"), "要显示本地链接")
 })
 
 // ── ⑮ 快照是空的也不会把「早已绑过」的号发出去 ────────────────────────────

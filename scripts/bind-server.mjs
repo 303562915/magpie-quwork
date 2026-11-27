@@ -184,19 +184,15 @@ export function createBindServer(opts = {}) {
         const cards = []
         const seen = new Set()
         for (let i = 0; i < want; i += 1) {
-          const r = await portal.allocate()
+          // ⚠ 走 prepareScan：出的是 confirm?uuid= 的真码，且后台监听扫码自动绑定
+          const r = await portal.prepareScan()
           if (!r.ok) break
           if (seen.has(r.key)) {
             // 不该发生（占位锁保证），真发生了也别重复展示
             break
           }
           seen.add(r.key)
-          let qrDataUri = ""
-          try {
-            qrDataUri = `data:image/png;base64,${qrPng(r.authorizeUrl, { ecl: "L", scale: 6, border: 3 }).toString("base64")}`
-          } catch {
-            qrDataUri = ""
-          }
+          const qrDataUri = r.qr || ""
           cards.push({ sessionId: r.sessionId, label: r.label, qrDataUri, ttlMs: r.ttlMs })
         }
         const ov = portal.overview()
@@ -215,18 +211,27 @@ export function createBindServer(opts = {}) {
         if (!allow(`go|${ipOf(req)}`, allocateWindowMs)) {
           return sendHtml(res, errorPage("操作太快了，请等几秒再扫一次", { mount }))
         }
-        const r = await portal.allocate()
+        // 单号页也走正确链路（prepareScan 自动挑一个未绑的号）
+        const r = await portal.prepareScan()
         if (!r.ok) {
           return sendHtml(res, r.reason === "no-account" ? noAccountPage({ mount }) : errorPage(String(r.message ?? ""), { mount }))
         }
-        let qrDataUri = ""
-        try {
-          qrDataUri = `data:image/png;base64,${qrPng(r.authorizeUrl, { ecl: "L", scale: 8, border: 4 }).toString("base64")}`
-        } catch (e) {
-          log?.warn?.(`bind: 二维码生成失败: ${String(e?.message ?? e).slice(0, 120)}`)
+        if (!r.qr) {
+          log?.warn?.("bind: prepareScan 没给二维码图")
           return sendHtml(res, errorPage("二维码生成失败", { mount }))
         }
-        return sendHtml(res, goPage({ sessionId: r.sessionId, label: r.label, qrDataUri, authorizeUrl: r.authorizeUrl, ttlMs: r.ttlMs, mount, notWeChat: isNotWeChat(req) }))
+        return sendHtml(
+          res,
+          goPage({
+            sessionId: r.sessionId,
+            label: r.label,
+            qrDataUri: r.qr,
+            authorizeUrl: r.confirmUrl || r.authorizeUrl || "",
+            ttlMs: r.ttlMs,
+            mount,
+            notWeChat: isNotWeChat(req),
+          }),
+        )
       }
 
       if (isGet && rest === "/qr.png") {
@@ -284,15 +289,15 @@ export function createBindServer(opts = {}) {
         const want = Math.max(1, Math.min(6, Number(url.searchParams.get("n")) || 1))
         const cards = []
         for (let i = 0; i < want; i += 1) {
-          const r = await portal.allocate()
+          const r = await portal.prepareScan()
           if (!r.ok) break
-          let qrDataUri = ""
-          try {
-            qrDataUri = `data:image/png;base64,${qrPng(r.authorizeUrl, { ecl: "L", scale: 6, border: 3 }).toString("base64")}`
-          } catch {
-            qrDataUri = ""
-          }
-          cards.push({ sessionId: r.sessionId, label: r.label, qrDataUri, ttlMs: r.ttlMs })
+          cards.push({
+            sessionId: r.sessionId,
+            label: r.label,
+            qrDataUri: r.qr || "",
+            url: r.confirmUrl || "",
+            ttlMs: r.ttlMs,
+          })
         }
         return sendJson(res, 200, { ok: cards.length > 0, cards })
       }

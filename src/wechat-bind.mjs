@@ -698,10 +698,30 @@ export function createBindPortal(opts) {
      */
     async prepareScan(key) {
       sweep()
-      const want = String(key ?? "").trim()
-      if (!want) return { ok: false, reason: "missing-key", message: "没有指定账号" }
-
       const entries = listPoolTokens(configDir)
+
+      /**
+       * 不传 key 时自动挑一个号（阵列页 / `/bind/go` 用）。
+       *
+       * 挑选规则与 `allocate()` 一致：跳过已绑、token 失效、正被占着的号。
+       * 区别只在**出码方式** —— 这里走的是修复后的正确链路（uuid → confirm?uuid=），
+       * 而不是把 `qrconnect` 页面地址编成二维码。
+       */
+      let want = String(key ?? "").trim()
+      if (!want) {
+        const snap = readPool(configDir).accounts
+        const taken = new Set([...locks.keys(), ...reserved.keys()])
+        const free = entries
+          .map((a) => a.key)
+          .filter((k) => snap[k]?.wechatBound !== true && snap[k]?.tokenInvalid !== true && !taken.has(k))
+        want = free[0] ?? ""
+        if (!want) return { ok: false, reason: "no-account", message: "池子里暂时没有可分配的账号" }
+        // ⚠ 必须在 await 之前就占住：两次并发进来会看到同一批空闲号，
+        //   不预留就会把同一个号发两次（§17b 踩过）。成功后由 locks 接管，
+        //   失败路径靠 TTL 过期自动回收。
+        reserved.set(want, now() + RESERVE_MS)
+      }
+
       const token = String(entries.find((a) => a.key === want)?.token ?? "").trim()
       if (!token) return { ok: false, reason: "no-token", message: `池子里没有这个账号或它没有平台 token：${want}` }
 
@@ -748,6 +768,8 @@ export function createBindPortal(opts) {
       }
       sessions.set(sessionId, session)
       locks.set(want, sessionId)
+      // 锁已经拿到，预留可以撤了（否则那个号在本轮同步里还会被当成"忙"）
+      reserved.delete(want)
 
       // 码：优先用微信官方那张图；取不到就用我们自己的编码器编 confirmUrl
       let qr = ""
@@ -1045,12 +1067,18 @@ export function createBindPortal(opts) {
       }
 
       // 新链路（prepareScan）：把微信侧实时状态透出去，页面能区分
-      // 「还没人扫 / 已扫码待确认 / 已确认正在绑定 / 失败原因」
-      if (s.scanState) {
+      // 「还没人扫 / 已扫码待确认 / 已确认正在绑定」。
+      //
+      // ⚠ **只在「已确认 / 正在绑定」时提前返回**：那时后台正在换 token + 绑定，
+      //   不必再打一次上游。而 waiting / scanned 阶段要继续往下走 —— 下面会实测
+      //   `/api/user/self`，这样即便后台监听漏了（网络抖动、页面早关），
+      //   平台真绑上了也能立刻被认出来（以前就是在这里提前 return 导致永远 pending）。
+      const scanHint = s.scanState ?? ""
+      if (scanHint === "confirmed") {
         return {
           status: "pending",
           label,
-          scanState: s.scanState,
+          scanState: scanHint,
           attempts: s.attempts ?? 0,
           remainingMs: Math.max(0, s.expiresAt - now()),
           ...(s.scanError ? { message: s.scanError } : {}),

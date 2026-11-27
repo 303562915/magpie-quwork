@@ -1126,14 +1126,29 @@ async function loadBindPool() {
  * 页面上猜不出来；只有服务端自己知道最终拼成了什么。
  */
 async function refreshBindQr() {
-  const bust = `${BASE}/bind/qr.png?scale=8&t=${Date.now()}`
-  const target = await fetch(bust, { method: "HEAD" })
-    .then((r) => r.headers.get("x-qr-target"))
-    .catch(() => null)
-  $("bind-qr").src = bust
-  if (target) $("bind-target").textContent = target
-  const big = $("bind-print")
-  if (big) big.href = `${BASE}/bind/qr.png?scale=16&t=${Date.now()}`
+  // 公网地址是随机隧道，重启就变 —— 所以这里**只给链接**，不画二维码
+  const bust = BASE + "/bind/qr.png?scale=8&t=" + Date.now()
+  let target = ""
+  try {
+    const head = await fetch(bust, { method: "HEAD" })
+    target = String(head.headers.get("x-qr-target") || "").trim()
+  } catch {}
+
+  const publicUrl = target || BASE + "/bind/go"
+  const localUrl = BASE + "/bind/go"
+
+  const aPub = $("bind-url-public")
+  if (aPub) {
+    aPub.textContent = publicUrl
+    aPub.href = publicUrl
+  }
+  const aLoc = $("bind-url-local")
+  if (aLoc) {
+    aLoc.textContent = localUrl
+    aLoc.href = localUrl
+  }
+  state.bindPublicUrl = publicUrl
+  state.bindLocalUrl = localUrl
 }
 
 on($("bind-refresh"), loadBindPool)
@@ -1158,7 +1173,7 @@ on($("bind-save-public"), async () => {
   const d = await api("/api/settings", { bindPublicUrl: v })
   const saved = String(d?.settings?.bindPublicUrl ?? "")
   $("bind-public").value = saved
-  $("bind-public-note").textContent = saved ? "已保存，二维码已刷新" : "已清空（改用当前面板地址）"
+  $("bind-public-note").textContent = saved ? "已保存，链接已刷新" : "已清空（改用当前面板地址）"
   await refreshBindQr()
   toast(saved ? `固定码已指向 ${saved}` : "已清空公网地址")
 })
@@ -1185,15 +1200,30 @@ on($("bind-release"), async () => {
 })
 
 ;(function initBindStatic() {
-  const qr = $("bind-qr")
-  if (qr) qr.src = `${BASE}/bind/qr.png`
   const open = $("bind-open")
-  if (open) open.href = `${BASE}/bind`
+  if (open) open.href = BASE + "/bind"
   const wall = $("bind-wall")
-  if (wall) wall.href = `${BASE}/bind/wall`
-  const target = $("bind-target")
-  if (target) target.textContent = `${BASE}/bind/go`
+  if (wall) wall.href = BASE + "/bind/wall"
+  void refreshBindQr()
 })()
+
+// 复制链接（公网 / 本地）
+on($("bind-copy-public"), async () => {
+  try {
+    await navigator.clipboard.writeText(String(state.bindPublicUrl ?? ""))
+    toast("公网链接已复制")
+  } catch {
+    toast("复制失败，请手动选中链接", true)
+  }
+})
+on($("bind-copy-local"), async () => {
+  try {
+    await navigator.clipboard.writeText(String(state.bindLocalUrl ?? ""))
+    toast("本地链接已复制")
+  } catch {
+    toast("复制失败，请手动选中链接", true)
+  }
+})
 
 // ── 顶栏 ───────────────────────────────────────────────────────────────
 on($("bind-release-all"), async () => {
