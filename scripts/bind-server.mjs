@@ -268,7 +268,7 @@ export function createBindServer(opts = {}) {
       if (isGet && rest === "/api/qr") {
         if (!portal.authorize(req)) return sendJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" })
         const key = String(url.searchParams.get("key") ?? "").trim()
-        const one = await portal.allocateOne(key)
+        const one = await portal.prepareScan(key)
         if (!one.ok) return sendJson(res, 200, { ok: false, error: one.message ?? one.reason ?? "出码失败" })
         return sendJson(res, 200, one)
       }

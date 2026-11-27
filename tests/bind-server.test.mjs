@@ -38,6 +38,21 @@ function fakeFetch(boundTokens = []) {
     if (p === "/api/oauth/wechat/url") {
       return Response.json({ success: true, data: { url: `https://open.weixin.qq.com/connect/qrconnect?state=s-${token}` } })
     }
+    // 授权页：prepareScan 要从里面取 uuid（真实机制见 src/wechat-watch.mjs 头注释）
+    if (p === "/connect/qrconnect") {
+      const st = new URL(String(url)).searchParams.get("state") ?? "x"
+      return new Response(`<html><script>var uuid="TESTUUID${st.replace(/[^a-z0-9]/gi, "").slice(0, 8).padEnd(8, "0")}";</script></html>`, {
+        headers: { "content-type": "text/html" },
+      })
+    }
+    // 官方二维码图：给一段最小 PNG 头，让 prepareScan 认为取到了图
+    if (p.startsWith("/connect/qrcode/")) {
+      return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...new Uint8Array(200)]), {
+        headers: { "content-type": "image/png" },
+      })
+    }
+    // 微信长轮询：默认一直「等待扫码」
+    if (p === "/connect/l/qrconnect") return new Response("window.wx_errcode=408;window.wx_code='';")
     return Response.json({ success: false, message: "?" })
   }
   return { fetchImpl, calls, bound }
@@ -427,12 +442,13 @@ test("B14 /bind/api/qr?key=…：指定账号出码（管理鉴权；已绑的�
   assert.equal(bad.ok, false)
   assert.match(String(bad.error ?? ""), /已经绑过微信/)
 
-  // 未绑的号出码
+  // 未绑的号出码：走 prepareScan（打开授权页取 uuid → 真正的码是 confirm?uuid=）
   const good = await fetch(`${base}/bind/api/qr?key=quwork%231`).then((r) => r.json())
-  assert.equal(good.ok, true)
+  assert.equal(good.ok, true, `出码应成功：${JSON.stringify(good)}`)
   assert.equal(good.label, "#2")
-  assert.ok(String(good.qr).startsWith("data:image/png;base64,"))
-  assert.ok(String(good.authorizeUrl).includes(good.state))
+  assert.ok(String(good.qr).startsWith("data:image/"), "要直接给一张可显示的图")
+  assert.ok(String(good.uuid).length > 0, "必须拿到微信 uuid")
+  assert.match(String(good.confirmUrl), /connect\/confirm\?uuid=/, "真正要扫的是 confirm?uuid=")
 })
 
 test("B14b /bind/api/qr 也要鉴权（不能给公网裸奔）", async (t) => {

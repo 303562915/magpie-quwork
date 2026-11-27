@@ -36,6 +36,8 @@ import { PLATFORM_BASE_URL, PLATFORM_TIMEOUT_MS } from "./constants.mjs"
 import { callPlatform } from "./invite.mjs"
 import { readAll } from "./auth-store.mjs"
 import { qrPng } from "./qr.mjs"
+import { confirmUrlOf, fetchQrImage, openAuthorizePage, readScanOnce } from "./wechat-watch.mjs"
+import { bindWechat, exchangeCode } from "./wechat.mjs"
 
 /** 账号池落盘文件名（与面板其它缓存同级）。 */
 export const BIND_POOL_FILE = "quwork-bind-pool.json"
@@ -405,6 +407,118 @@ export function createBindPortal(opts) {
    *   会话本身还能原地续一张新码（见 `check()`）。真正的作废只发生在：
    *   续码次数用完、或号已经被绑掉 —— 两处都在 `check()` 里显式落 `expired`。
    */
+  /**
+   * 后台监听一个扫码会话：微信长轮询 → 一旦确认就自己换 token 并绑定。
+   *
+   * # 为什么放在后台
+   *
+   * `lp.open.weixin.qq.com/connect/l/qrconnect` 是**长轮询**（服务端会 hold 20+ 秒）。
+   * 如果让页面每 3 秒来打一次，会把连接堆满；所以这里起一条独立循环，
+   * 页面只读 `session.scanState` / `session.status` 这类即时状态。
+   *
+   * # 成功路径
+   *
+   *	waiting → scanned(403，已扫码未确认) → confirmed(405 + wx_code)
+   *	→ exchangeCode(code) 换 wechat_token → bindWechat(该号 token) → 落 bound
+   *
+   * 失败也写进 `session.scanError`，面板/页面能直接看到原因（不会只是一句"绑定失败"）。
+   *
+   * @param {any} session `prepareScan()` 建出来的会话
+   */
+  async function watchScan(session) {
+    const deadline = Math.min(session.expiresAt, now() + 10 * 60 * 1000)
+    let last = ""
+
+    /**
+     * 两次轮询之间至少歇这么久。
+     *
+     * ⚠ 这个不能省：微信长轮询在「没人扫」时可能**立刻**返回 408（真机与测试都会），
+     *   不歇就是一条死循环，把对方接口打爆、也让进程永远退不出去。
+     */
+    const minGapMs = Math.max(200, Number(opts?.scanPollGapMs) || 1200)
+    const sleep = (ms) =>
+      new Promise((resolve) => {
+        const t = setTimeout(resolve, ms)
+        // 测试/短命进程里不要因为这个定时器吊住事件循环
+        if (typeof t?.unref === "function") t.unref()
+      })
+
+    while (now() < deadline) {
+      if (session.status !== "pending") return
+      const r = await readScanOnce({ uuid: session.uuid, last: last || undefined, fetchImpl })
+      if (r.errcode) last = r.errcode
+      session.attempts = (session.attempts ?? 0) + 1
+      session.lastSeenAt = now()
+
+      if (r.state === "scanned") {
+        session.scanState = "scanned" // 已扫码，等他点「确认登录」
+        await sleep(minGapMs)
+        continue
+      }
+      if (r.state === "expired") {
+        session.scanState = "expired"
+        session.status = "expired"
+        session.settledAt = now()
+        session.scanError = "二维码已过期（微信侧）"
+        if (locks.get(session.key) === session.sessionId) locks.delete(session.key)
+        return
+      }
+      if (r.state !== "confirmed") {
+        session.scanState = r.state === "waiting" ? "waiting" : (session.scanState ?? "waiting")
+        await sleep(minGapMs)
+        continue
+      }
+
+      // ── 已确认：拿到 code，开始真正的绑定 ──
+      session.scanState = "confirmed"
+      session.binding = true
+      const token = String(listPoolTokens(configDir).find((a) => a.key === session.key)?.token ?? "").trim()
+      if (!token) {
+        session.scanError = "这个账号没有平台 token"
+        session.status = "expired"
+        session.settledAt = now()
+        return
+      }
+
+      const ex = await exchangeCode({ code: r.code, state: session.state, platformBaseUrl, fetchImpl })
+      if (!ex.ok) {
+        session.scanError = `换 wechat_token 失败：${ex.message}`
+        session.status = "expired"
+        session.settledAt = now()
+        if (locks.get(session.key) === session.sessionId) locks.delete(session.key)
+        return
+      }
+
+      const bound = await bindWechat({ platformBaseUrl, token, wechatToken: ex.wechatToken, fetchImpl })
+      if (!bound.ok) {
+        session.scanError = `绑定时平台拒绝：${bound.message}`
+        session.status = "expired"
+        session.settledAt = now()
+        if (locks.get(session.key) === session.sessionId) locks.delete(session.key)
+        return
+      }
+
+      // 绑定成功：再用 /api/user/self 复核一次（平台说绑上了才算）
+      const after = await fetchSelf({ platformBaseUrl, token, fetchImpl })
+      session.status = "bound"
+      session.settledAt = now()
+      session.scanState = "bound"
+      session.wechatId = after.ok ? after.wechatId : ""
+      session.verified = Boolean(after.ok && after.wechatBound)
+      markBound(session.key, { wechatId: session.wechatId })
+      if (locks.get(session.key) === session.sessionId) locks.delete(session.key)
+      return
+    }
+
+    // 超时
+    if (session.status === "pending") {
+      session.status = "expired"
+      session.settledAt = now()
+      session.scanError = "10 分钟没人扫，已放回池子"
+      if (locks.get(session.key) === session.sessionId) locks.delete(session.key)
+    }
+  }
+
   const sweep = () => {
     const t = now()
     for (const [k, until] of [...reserved.entries()]) if (t > until) reserved.delete(k)
@@ -516,6 +630,100 @@ export function createBindPortal(opts) {
     async sync(input) {
       const r = await refreshPool({ configDir, platformBaseUrl, fetchImpl, now, concurrency: input?.concurrency })
       return { ...r, overview: poolOverview({ configDir }) }
+    },
+
+    /**
+     * **全自动**扫码绑定：出正确的码 + 后台监听扫码 + 收到 code 就自己绑。
+     *
+     * # 为什么和 `allocateOne` 不同
+     *
+     * `allocateOne` 还是老路子：把平台签发的 `qrconnect` 地址编成二维码让人扫。
+     * 那条路**走不通**——`qrconnect` 是个页面，谁打开它都会现场生成新 uuid，
+     * 扫码的人等于只是「用微信打开了登录页」，平台只会让他登录。
+     *
+     * 正确机制（`wechat-watch.mjs` 头部有完整说明）：
+     *	打开授权页 → 取 uuid → 真正的码是 `confirm?uuid=<UUID>` →
+     *	后台轮询 `lp.open.weixin.qq.com/connect/l/qrconnect?uuid=<UUID>` →
+     *	`wx_errcode=405` 时 `wx_code` 就是授权码 → 换 wechat_token → POST bind。
+     *
+     * 这一路**不需要扫码人回传任何东西**。
+     *
+     * @param {string} key 账号 key
+     * @returns {Promise<{ok: boolean, reason?: string, message?: string, key?: string, label?: string,
+     *   sessionId?: string, uuid?: string, confirmUrl?: string, qr?: string, ttlMs?: number}>}
+     */
+    async prepareScan(key) {
+      sweep()
+      const want = String(key ?? "").trim()
+      if (!want) return { ok: false, reason: "missing-key", message: "没有指定账号" }
+
+      const entries = listPoolTokens(configDir)
+      const token = String(entries.find((a) => a.key === want)?.token ?? "").trim()
+      if (!token) return { ok: false, reason: "no-token", message: `池子里没有这个账号或它没有平台 token：${want}` }
+
+      const self = await fetchSelf({ platformBaseUrl, token, fetchImpl })
+      if (!self.ok) return { ok: false, reason: "upstream", message: self.message ?? "读账号状态失败" }
+      if (self.wechatBound) {
+        markBound(want, { wechatId: self.wechatId })
+        return { ok: false, reason: "already-bound", message: "这个号已经绑过微信了" }
+      }
+
+      const got = await fetchAuthorizeUrl({ platformBaseUrl, token, fetchImpl })
+      if (!got.ok || !got.state) return { ok: false, reason: "upstream", message: got.message ?? "取授权地址失败" }
+
+      // 打开授权页取 uuid —— 这一步是关键，qrconnect 本身不能当二维码内容
+      const opened = await openAuthorizePage({ authorizeUrl: got.url, fetchImpl })
+      if (!opened.ok || !opened.uuid) {
+        return { ok: false, reason: "no-uuid", message: opened.message ?? "授权页没给 uuid" }
+      }
+
+      const confirmUrl = confirmUrlOf(opened.uuid)
+      const sessionId = randomUUID().replace(/-/g, "").slice(0, 12)
+      const session = {
+        sessionId,
+        key: want,
+        state: got.state,
+        authorizeUrl: String(got.url),
+        uuid: opened.uuid,
+        confirmUrl,
+        issuedAt: now(),
+        expiresAt: now() + sessionTtlMs,
+        status: "pending",
+        lastSeenAt: now(),
+        scanState: "waiting",
+        attempts: 0,
+        binding: false,
+      }
+      sessions.set(sessionId, session)
+      locks.set(want, sessionId)
+
+      // 码：优先用微信官方那张图；取不到就用我们自己的编码器编 confirmUrl
+      let qr = ""
+      const img = await fetchQrImage({ uuid: opened.uuid, fetchImpl })
+      if (img.ok && img.bytes) {
+        qr = `data:${img.contentType ?? "image/jpeg"};base64,${Buffer.from(img.bytes).toString("base64")}`
+      } else if (qrPngImpl) {
+        try {
+          qr = `data:image/png;base64,${qrPngImpl(confirmUrl, { ecl: "M", scale: 8, border: 4 }).toString("base64")}`
+        } catch {
+          qr = ""
+        }
+      }
+
+      // 后台监听（不 await）：一来 code 就自己换 token 并绑定
+      void watchScan(session)
+
+      return {
+        ok: true,
+        key: want,
+        label: labelOf(entries.map((a) => a.key), want),
+        sessionId,
+        uuid: opened.uuid,
+        confirmUrl,
+        state: got.state,
+        qr,
+        ttlMs: sessionTtlMs,
+      }
     },
 
     /**
@@ -772,8 +980,28 @@ export function createBindPortal(opts) {
       // 记录「最后一次有人在轮询」—— releaseAll(idleMs) 靠它区分「有人盯着」与「僵尸会话」
       s.lastSeenAt = now()
 
-      if (s.status === "bound") return { status: "bound", label }
-      if (s.status === "expired") return { status: "expired", message: "这次的码已失效，请重新扫码" }
+      if (s.status === "bound") return { status: "bound", label, scanState: "bound", verified: s.verified }
+      if (s.status === "expired") {
+        return {
+          status: "expired",
+          released: true,
+          scanState: s.scanState ?? "expired",
+          message: s.scanError || "这次的码已失效，请重新扫码",
+        }
+      }
+
+      // 新链路（prepareScan）：把微信侧实时状态透出去，页面能区分
+      // 「还没人扫 / 已扫码待确认 / 已确认正在绑定 / 失败原因」
+      if (s.scanState) {
+        return {
+          status: "pending",
+          label,
+          scanState: s.scanState,
+          remainingMs: Math.max(0, s.expiresAt - now()),
+          ...(s.scanError ? { message: s.scanError } : {}),
+          ...(s.uuid ? { confirmUrl: s.confirmUrl } : {}),
+        }
+      }
 
       const expired = now() > s.expiresAt
 

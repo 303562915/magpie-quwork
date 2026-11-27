@@ -1165,7 +1165,7 @@ export function createPageServer(opts = {}) {
         if (isGet && rest === "/api/qr") {
           if (!bindPortal.authorize(req)) return sendAdminJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" }, req, { head: isHead })
           const key = String(url.searchParams.get("key") ?? "").trim()
-          const one = await bindPortal.allocateOne(key)
+          const one = await bindPortal.prepareScan(key)
           if (!one.ok) return sendAdminJson(res, 200, { ok: false, error: one.message ?? one.reason ?? "出码失败" }, req, { head: isHead })
           return sendAdminJson(res, 200, one, req, { head: isHead })
         }

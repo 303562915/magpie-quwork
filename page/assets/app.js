@@ -372,9 +372,9 @@ async function showQrRow(btn, key) {
         <div class="qr-side">
           <p class="big">${esc(d.label)} · 待绑定</p>
           <p class="hint">手机微信「扫一扫」扫左边这张（相册 / 长按识别无效），再点「确认登录」。</p>
-          <p class="hint">有效期 ${Math.round((Number(d.ttlMs) || 0) / 1000)} 秒 · 会话 <span class="mono">${esc(d.sessionId)}</span></p>
+          <p class="hint">有效期 ${Math.round((Number(d.ttlMs) || 0) / 1000)} 秒 · uuid <span class="mono">${esc(d.uuid || "")}</span></p>
           <div class="toolbar-actions">
-            <button class="tiny" data-qr="copy">复制授权链接</button>
+            <button class="tiny" data-qr="copy">复制扫码链接</button>
             <button class="tiny" data-qr="poll">查一次状态</button>
             <button class="tiny danger" data-qr="close">收起</button>
           </div>
@@ -404,7 +404,7 @@ async function showQrRow(btn, key) {
         toast("授权链接已复制，发给别人用浏览器打开即可出码")
       } catch {
         toast("复制失败：请手动选中下面的链接复制", true)
-        status.textContent = String(d.authorizeUrl ?? "")
+        status.textContent = String(d.confirmUrl || d.authorizeUrl || "")
       }
     })
     row.querySelector('[data-qr="poll"]').addEventListener("click", async () => {
@@ -425,7 +425,39 @@ async function showQrRow(btn, key) {
       }
     })
 
-    // 「用回调地址完成绑定」：真绑定走的是 POST /api/wechat/finish（换 wechat_token → bind）
+    // 盯着这一行：新链路在服务端监听微信，前端只把状态显示出来。
+    // ⚠ 不用 setInterval（面板不许有常驻轮询）：用自我重排的 setTimeout，
+    //   行一收起 / 会话一落定就停，不会在上游留下长跑请求。
+    let alive = true
+    const map = {
+      waiting: "等待扫码…",
+      scanned: "👀 已扫码，等他在微信里点「确认登录」",
+      confirmed: "⏳ 已确认，正在换 token 并绑定…",
+    }
+    const tick = async () => {
+      if (!alive || !row.isConnected) return
+      try {
+        const st = await api(`/bind/api/check?session=${encodeURIComponent(d.sessionId)}`)
+        if (st.status === "bound") {
+          alive = false
+          status.textContent = "✅ 已绑定（平台已确认）"
+          toast("绑定成功")
+          void loadAccounts()
+          return
+        }
+        if (st.status === "expired") {
+          alive = false
+          status.textContent = `⏳ ${st.message || "已过期，重新点「出码」"}`
+          return
+        }
+        status.textContent = map[st.scanState] || `等待中…${st.message ? "（" + st.message + "）" : ""}`
+      } catch {}
+      if (alive) setTimeout(tick, 2000)
+    }
+    setTimeout(tick, 1500)
+    row.querySelector('[data-qr="close"]').addEventListener("click", () => { alive = false })
+
+    // 兜底：万一自动监听不通，还能手动「用回调地址完成绑定」（POST /api/wechat/finish）
     const box = row.querySelector('[data-qr="paste-box"]')
     row.querySelector('[data-qr="paste"]').addEventListener("click", () => {
       box.hidden = !box.hidden
