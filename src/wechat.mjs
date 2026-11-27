@@ -172,6 +172,9 @@ export async function exchangeCode(opts) {
       bindType: d?.bind_type ?? null,
       keys: Object.keys(d ?? {}).slice(0, 20),
       ...(cls.boundAccount ? { boundAccount: cls.boundAccount } : {}),
+      ...(d?.is_new !== undefined ? { isNew: d.is_new } : {}),
+      // 平台原话（截断到 240 字）：面板上直接照原样显示，避免我"替平台解释"
+      bodyPreview: JSON.stringify(d).slice(0, 240),
     }
     attempts.push({ label, ok: r.ok, kind: cls.kind, message: r.message ?? "" })
     return { r, d, cls }
