@@ -41,7 +41,7 @@ import { qrPng } from "./qr.mjs"
 export const BIND_POOL_FILE = "quwork-bind-pool.json"
 
 /** 一次扫码会话的有效期（= 占位锁的持有时间）。 */
-export const SESSION_TTL_MS = 5 * 60 * 1000
+export const SESSION_TTL_MS = 10 * 60 * 1000
 
 /** 账号池快照多久算旧（超过就在「没有可用账号」时才去重读一次上游）。 */
 export const POOL_TTL_MS = 5 * 60 * 1000
@@ -180,12 +180,21 @@ export async function fetchAuthorizeUrl(opts) {
   const url = String(r.data?.url ?? "").trim()
   if (!url) return { ok: false, message: "平台没有返回授权地址" }
 
-  let state = ""
+  // ⚠ 必须是**合法 http(s) URL**。真机踩过：平台限流时可能回一个残缺值，
+  //   而 `qrPng(undefined)` 会把字符串 "undefined" 编成一张**扫不出内容**的二维码 ——
+  //   外层以为出码成功，人扫了却什么都没发生。宁可这里判失败，让调用方跳过这个号。
+  let parsed
   try {
-    state = new URL(url).searchParams.get("state") ?? ""
+    parsed = new URL(url)
   } catch {
-    state = ""
+    return { ok: false, message: `平台返回的授权地址不合法：${url.slice(0, 40)}` }
   }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    return { ok: false, message: `平台返回的授权地址协议异常：${parsed.protocol}` }
+  }
+
+  const state = parsed.searchParams.get("state") ?? ""
+  if (!state) return { ok: false, message: "授权地址里没有 state（这张码绑不到号）" }
   return { ok: true, url, state }
 }
 
@@ -358,7 +367,7 @@ export function createBindPortal(opts) {
   const sessionTtlMs = Number(opts?.sessionTtlMs) > 0 ? Number(opts.sessionTtlMs) : SESSION_TTL_MS
   const poolTtlMs = Number(opts?.poolTtlMs) > 0 ? Number(opts.poolTtlMs) : POOL_TTL_MS
   const maxSessions = Number(opts?.maxSessions) > 0 ? Number(opts.maxSessions) : 500
-  const maxRenewals = Number.isInteger(opts?.maxRenewals) && opts.maxRenewals >= 0 ? opts.maxRenewals : 6
+  const maxRenewals = Number.isInteger(opts?.maxRenewals) && opts.maxRenewals >= 0 ? opts.maxRenewals : 0
   /** 续码时现画二维码（注入点：测试给假实现，生产用默认编码器）。 */
   const qrPngImpl = opts?.qrPngImpl === null ? null : (typeof opts?.qrPngImpl === "function" ? opts.qrPngImpl : qrPng)
   const adminToken = String(opts?.adminToken ?? "").trim()

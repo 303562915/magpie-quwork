@@ -141,6 +141,10 @@ footer { color: #9ca3af; font-size: 12px; }
 .cell-head .timer { font-size: 13px; color: #6b7280; }
 .qr-sm { width: 100%; max-width: 130px; height: auto; image-rendering: pixelated; border-radius: 6px; }
 .cell-note { margin: 0; font-size: 12px; color: #4b5563; text-align: center; }
+.cell-link {
+  display: block; width: 100%; text-align: center; font-size: 12px; padding: 5px 6px;
+  border-radius: 8px; background: #eef1f5; color: #111827; text-decoration: none;
+}
 .cell.is-done { border-color: #07c160; background: #f0fdf4; }
 .cell.is-done .cell-note { color: #07c160; font-weight: 800; font-size: 15px; }
 .done-banner {
@@ -213,7 +217,7 @@ export function landingPage(opts = {}) {
   <h1>帮我们绑一个账号</h1>
   <p>点下面的按钮，页面会分给你一个<strong>还没绑定微信</strong>的账号，再用微信扫它给的码、点「确认登录」就完成了。</p>
   <div class="alert">必须用微信「扫一扫」直接扫码<small>相册选图 / 长按识别 打开的一律无效</small></div>
-  <p class="hint">每个账号只会分给一个人；分到之后 5 分钟内有效，过期会自动换新码；没人扫的账号会自动回到池子里。</p>
+  <p class="hint">每个账号只会分给一个人；分到之后 10 分钟内有效，过期会自动换新码；没人扫的账号会自动回到池子里。</p>
   <a class="btn" href="${esc(go)}">开始绑定</a>
   <a class="btn secondary" href="${esc(wall)}">看全部待绑定账号（群里发这个也行）</a>
   <p class="hint">当前可分配 <strong>${available}</strong> 个 · 已绑定 <strong>${bound}</strong> / 共 ${total} 个</p>
@@ -259,7 +263,8 @@ export function wallPage(opts = {}) {
       (c, i) => `<div class="cell" id="cell-${i}">
         <div class="cell-head"><span class="badge">待绑定 ${esc(c.label)}</span><span class="timer" id="left-${i}">--:--</span></div>
         <img class="qr-sm" id="qr-${i}" src="${esc(c.qrDataUri)}" alt="微信扫码绑定 ${esc(c.label)}">
-        <p class="cell-note" id="note-${i}">用微信扫一扫</p>
+        ${c.url ? `<a class="cell-link" href="${esc(c.url)}" target="_blank" rel="noreferrer">打开链接</a>` : ""}
+        <p class="cell-note" id="note-${i}">用微信扫一扫${c.url ? "（或点上面的链接）" : ""}</p>
       </div>`,
     )
     .join("")
@@ -273,7 +278,7 @@ export function wallPage(opts = {}) {
   <span class="badge">共 ${cards.length} 个待绑定账号</span>
   <h1>随便挑一个扫，帮我们绑一个号</h1>
   <div class="alert">必须用微信「扫一扫」直接扫下面任意一张<small>相册选图 / 长按识别 无效；扫完在微信里点「确认登录」</small></div>
-  <p class="hint">每张码有效期 5 分钟，过期会自己换新码；扫成功的那一格会变「已绑定」，别的格子照常可用。</p>
+  <p class="hint">每张码有效期 10 分钟，过期会自己换新码；扫成功的那一格会变「已绑定」，别的格子照常可用。</p>
   <div class="done-banner" id="done-banner">已绑定 ✓</div>
   <div class="grid">${grid}</div>
   <p class="hint"><a href="${esc(wall)}">刷新本页</a> · <a href="${esc(go)}">只给我一个号</a></p>
@@ -365,7 +370,7 @@ export function wallPage(opts = {}) {
           }
           if (j.status === "expired") {
             clearInterval(timer);
-            if (note) note.textContent = "这个号 5 分钟没人扫，已作废，正在换新号…";
+            if (note) note.textContent = "这个号 10 分钟没人扫，已作废，正在换新号…";
             reassign(k);
             return;
           }

@@ -86,8 +86,8 @@ export function createBindServer(opts = {}) {
 
   const rawAlloc = Number(opts.allocateWindowMs ?? 3000)
   const allocateWindowMs = Number.isFinite(rawAlloc) ? Math.max(0, rawAlloc) : 3000
-  const rawWall = Number(opts.wallWindowMs ?? 15000)
-  const wallWindowMs = Number.isFinite(rawWall) ? Math.max(0, rawWall) : 15000
+  const rawWall = Number(opts.wallWindowMs ?? 60000)
+  const wallWindowMs = Number.isFinite(rawWall) ? Math.max(0, rawWall) : 60000
   const rawCheck = Number(opts.checkWindowMs ?? 1000)
   const checkWindowMs = Number.isFinite(rawCheck) ? Math.max(0, rawCheck) : 1000
   const hits = new Map()
@@ -179,7 +179,7 @@ export function createBindServer(opts = {}) {
         if (!allow(`wall|${ipOf(req)}`, wallWindowMs)) {
           return sendHtml(res, errorPage("操作太快了，请等几秒再刷新", { mount }))
         }
-        const want = Math.max(1, Math.min(24, Number(url.searchParams.get("n")) || 6))
+        const want = Math.max(1, Math.min(12, Number(url.searchParams.get("n")) || 3))
         /** @type {Array<{sessionId: string, label: string, qrDataUri: string, ttlMs: number}>} */
         const cards = []
         const seen = new Set()

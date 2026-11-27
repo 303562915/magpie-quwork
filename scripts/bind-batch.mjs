@@ -29,7 +29,7 @@ import { esc } from "../src/bind-pages.mjs"
 
 /** 解析 `--count 12` / `--keys a,b` / `--per-page 6` / `--out path`。 */
 function parseArgs(argv) {
-  const out = { count: 0, keys: [], perPage: 6, out: "out/批量码表.html", scale: 10 }
+  const out = { count: 0, keys: [], perPage: 6, out: "out/批量码表.html", scale: 10, delayMs: 1200 }
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]
     if (a === "--count") out.count = Math.max(0, Number(argv[++i]) || 0)
@@ -37,6 +37,7 @@ function parseArgs(argv) {
     else if (a === "--per-page") out.perPage = Math.max(1, Number(argv[++i]) || 6)
     else if (a === "--out") out.out = String(argv[++i] ?? out.out)
     else if (a === "--scale") out.scale = Math.max(4, Math.min(20, Number(argv[++i]) || 10))
+    else if (a === "--delay") out.delayMs = Math.max(0, Number(argv[++i]) || 0)
   }
   return out
 }
@@ -68,7 +69,12 @@ export async function buildBatch(opts) {
 
   const items = []
   let skipped = 0
+  const skippedReasons = []
+  const delayMs = Math.max(0, Number(opts?.delayMs ?? 1200))
+  let first = true
   for (const a of candidates) {
+    if (!first && delayMs > 0) await new Promise((d) => setTimeout(d, delayMs))
+    first = false
     const token = String(a.token ?? "").trim()
     if (!token) {
       skipped += 1
@@ -84,9 +90,35 @@ export async function buildBatch(opts) {
       skipped += 1
       continue
     }
-    const got = await fetchAuthorizeUrl({ platformBaseUrl, token, fetchImpl: opts?.fetchImpl })
+    // 平台对 /api/oauth/wechat/url 有频控（HTTP 429「操作过于频繁」）：
+    // 直接跳过会让整批失败，所以要退避重试；重试仍失败才记 skipped。
+    /** @type {any} */
+    let got = null
+    const backoff = [15_000, 30_000, 60_000, 120_000]
+    for (let attempt = 0; attempt <= backoff.length; attempt += 1) {
+      got = await fetchAuthorizeUrl({ platformBaseUrl, token, fetchImpl: opts?.fetchImpl })
+      if (got.ok) break
+      const throttled = /频繁|429|too many/i.test(String(got.message ?? ""))
+      if (!throttled || attempt >= backoff.length) break
+      const wait = backoff[attempt]
+      if (opts?.onRetry) opts.onRetry({ key: a.key, attempt: attempt + 1, waitMs: wait, message: got.message })
+      await new Promise((d) => setTimeout(d, wait))
+    }
     if (!got.ok || !got.state) {
       skipped += 1
+      skippedReasons.push(`${a.key}: ${got.message ?? "取不到授权地址"}`)
+      continue
+    }
+    // 再兜一层：URL 必须是 http(s) 且带 state，否则画出来的码是废的
+    let parsedUrl = null
+    try {
+      parsedUrl = new URL(got.url)
+    } catch {
+      parsedUrl = null
+    }
+    if (!parsedUrl || !/^https?:$/.test(parsedUrl.protocol) || !parsedUrl.searchParams.get("state")) {
+      skipped += 1
+      skippedReasons.push(`${a.key}: 授权地址不合法`)
       continue
     }
     let dataUri = ""
@@ -171,6 +203,14 @@ ${cellsOf(list)}
   mkdirSync(dirname(outHtml), { recursive: true })
   writeFileSync(outHtml, html, "utf8")
 
+  // 链接表（A 形式）：每行 = 某号的授权 URL。用浏览器打开就是「微信登录」页（页里有码），
+  // 所以可以「发一条链接」代替「先扫固定码再出码」。
+  const linksPath = outHtml.replace(/\.html?$/i, "") + ".links.txt"
+  const links = ["# 每行一条：编号<TAB>授权链接（浏览器打开 → 页里出现码 → 微信扫它）"]
+    .concat(items.map((it) => `${it.label}\t${it.url}`))
+    .join("\n")
+  writeFileSync(linksPath, links + "\n", "utf8")
+
   const csvPath = outHtml.replace(/\.html?$/i, "") + ".csv"
   const csv = ["编号,账号key,手机号尾号,state,版本"]
     .concat(items.map((it) => `"${it.label}","${it.key}","${it.phoneTail}","${it.state}",${it.version}`))
@@ -181,10 +221,12 @@ ${cellsOf(list)}
     ok: true,
     made: items.length,
     skipped,
+    skippedReasons,
     outHtml,
     outCsv: csvPath,
+    outLinks: linksPath,
     pages: pages.length,
-    items: items.map(({ label, key, phoneTail, state }) => ({ label, key, phoneTail, state })),
+    items: items.map(({ label, key, phoneTail, state, url }) => ({ label, key, phoneTail, state, url })),
   }
 }
 
@@ -200,12 +242,14 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
     perPage: args.perPage,
     outHtml: resolve(process.cwd(), args.out),
     scale: args.scale,
+    delayMs: args.delayMs,
   })
   if (!r.ok) {
     console.error(`出码失败：${r.reason}`)
     process.exit(1)
   }
-  console.log(`已出码 ${r.made} 个（跳过 ${r.skipped} 个已绑/取不到码的），共 ${r.pages} 页`)
+  console.log(`已出码 ${r.made} 个（跳过 ${r.skipped} 个），共 ${r.pages} 页`)
+  for (const why of r.skippedReasons ?? []) console.log(`  跳过 ${why}`)
   console.log(`码表（可打印）：${r.outHtml}`)
   console.log(`对照表（别外发）：${r.outCsv}`)
   console.log("")
