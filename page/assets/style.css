@@ -167,3 +167,21 @@ small { display: block; font-size: 11px; color: var(--muted); }
 .qr-box { display: flex; gap: 16px; align-items: flex-start; padding: 10px 4px; flex-wrap: wrap; }
 .qr-img { border-radius: 10px; background: #fff; padding: 6px; border: 1px solid var(--line); }
 .qr-side { min-width: 240px; display: flex; flex-direction: column; gap: 4px; }
+
+/* 页面内弹窗（替代原生 confirm：后者在沙盒/被拦截时会静默返回 false） */
+.dlg-mask {
+  position: fixed; inset: 0; z-index: 90;
+  background: rgba(16, 24, 40, .45);
+  display: grid; place-items: center; padding: 20px;
+}
+.dlg-mask[hidden] { display: none; }
+.dlg {
+  width: min(560px, 100%); max-height: 80vh; overflow: auto;
+  background: var(--surface, #fff); color: inherit;
+  border: 1px solid var(--line, #e6eaf2); border-radius: 14px;
+  padding: 18px 20px; box-shadow: 0 18px 50px rgba(16, 24, 40, .22);
+}
+.dlg h3 { margin: 0 0 10px; font-size: 16px; }
+.dlg-body { font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+.dlg-body .cur { color: #07c160; font-weight: 700; }
+.dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }

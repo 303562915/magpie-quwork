@@ -1009,3 +1009,21 @@ test("T-DESKTOP-6) 探测结果里带 currentLogin，并把当前登录的账号
   assert.equal(r.accounts[0].isCurrent, true)
   assert.equal(r.accounts[1].isCurrent, false)
 })
+
+test("T-DESKTOP-7) 面板用页面内弹窗，不依赖原生 confirm（沙盒里 confirm 会静默失败）", async (t) => {
+  const { base } = await startRecording(t)
+  const html = await (await fetch(`${base}/`)).text()
+  assert.match(html, /id="dlg"/, "要有弹窗容器")
+  assert.match(html, /id="dlg-ok"/)
+  assert.match(html, /id="dlg-body"/)
+
+  const js = await (await fetch(`${base}/assets/app.js`)).text()
+  assert.match(js, /function askDialog/, "要有自绘弹窗")
+  assert.match(js, /askDialog\(\{/, "桌面端导入要走它")
+  // 业务里不该再用原生 confirm（askDialog 内部的兜底除外）
+  const nativeCalls = js.match(/(^|[^.\w])confirm\(/g) ?? []
+  assert.equal(nativeCalls.length, 0, `不该再有原生 confirm：${nativeCalls.length}`)
+
+  const css = await (await fetch(`${base}/assets/style.css`)).text()
+  assert.match(css, /\.dlg-mask/, "要有弹窗样式")
+})

@@ -120,6 +120,42 @@ async function api(path, body) {
 }
 
 let toastTimer = 0
+/**
+ * 页面内弹窗，返回 Promise<boolean>（点确定 true / 取消 false）。
+ *
+ * 为什么不用原生 `confirm`：它在沙盒 iframe 或被策略拦截时会**静默返回 false**，
+ * 用户看到的现象就是「点了没反应」。自己画一个就不会有这个问题。
+ *
+ * @param {{title?: string, body?: string, okText?: string, cancelText?: string, html?: boolean}} opts
+ * @returns {Promise<boolean>}
+ */
+function askDialog(opts = {}) {
+  return new Promise((resolve) => {
+    const mask = $("dlg")
+    if (!mask) return resolve(window.confirm(opts.body || opts.title || "确定？"))
+    $("dlg-title").textContent = String(opts.title ?? "提示")
+    const body = $("dlg-body")
+    if (opts.html) body.innerHTML = String(opts.body ?? "")
+    else body.textContent = String(opts.body ?? "")
+    $("dlg-ok").textContent = String(opts.okText ?? "确定")
+    $("dlg-cancel").textContent = String(opts.cancelText ?? "取消")
+    mask.hidden = false
+
+    const done = (v) => {
+      mask.hidden = true
+      $("dlg-ok").onclick = null
+      $("dlg-cancel").onclick = null
+      mask.onclick = null
+      resolve(v)
+    }
+    $("dlg-ok").onclick = () => done(true)
+    $("dlg-cancel").onclick = () => done(false)
+    mask.onclick = (e) => {
+      if (e.target === mask) done(false)
+    }
+  })
+}
+
 function toast(msg, bad = false) {
   const el = $("toast")
   el.textContent = String(msg)
@@ -308,7 +344,7 @@ $("accounts-body")?.addEventListener("click", async (e) => {
   if (act === "delete") {
     const acc = state.accounts.find((a) => a.key === key)
     if (!acc) return
-    if (!confirm(`确定删除账号 ${acc.accountId || key}？\n会先备份 plugin-auth.json。`)) return
+    if (!(await askDialog({ title: "删除账号", body: `确定删除 ${acc.accountId || key}？\n会先备份 plugin-auth.json。` }))) return
     const d = await api("/api/accounts/delete", { keys: [key] })
     state.selected.delete(key)
     await loadAccounts()
@@ -570,7 +606,7 @@ on($("refresh-selected"), async () => {
 on($("delete-selected"), async () => {
   const keys = [...state.selected]
   if (keys.length === 0) return toast("先选中账号", true)
-  if (!confirm(`确定删除 ${keys.length} 个账号？\n会先备份 plugin-auth.json。`)) return
+  if (!(await askDialog({ title: "删除账号", body: `确定删除 ${keys.length} 个账号？\n会先备份 plugin-auth.json。` }))) return
   const d = await api("/api/accounts/delete", { keys })
   state.selected.clear()
   await loadAccounts()
@@ -1135,6 +1171,21 @@ on($("bind-release"), async () => {
 })()
 
 // ── 顶栏 ───────────────────────────────────────────────────────────────
+on($("bind-release-all"), async () => {
+  const yes = await askDialog({
+    title: "全部强制清掉",
+    body: "这会作废别人正在扫的码（他点了确认也绑不上）。\n确定要全部清掉吗？",
+    okText: "强制清掉",
+    cancelText: "取消",
+  })
+  if (!yes) return
+  const d = await api("/bind/api/release?all=1", {})
+  $("bind-note").textContent = `已强制清掉全部占用：会话 ${d.releasedSessions ?? 0} · 锁 ${d.releasedLocks ?? 0}`
+  if (d.overview) renderBind(d.overview)
+  toast("已全部清掉")
+  await refreshBindQr()
+})
+
 on($("refresh-all"), async () => {
   setStatus("刷新中…")
   await api("/api/accounts/refresh", {})
@@ -1154,39 +1205,63 @@ on($("refresh-all"), async () => {
  */
 on($("import-desktop"), async () => {
   const btn = $("import-desktop")
+  const label = btn.textContent
   btn.disabled = true
+  btn.textContent = "读取中…"
+  toast("正在读取本机客户端登录态…")
   try {
     const probe = await api("/api/accounts/from-desktop", { dryRun: true })
-    if (!probe.ok) return toast(String(probe.error || "没有读到客户端登录态"), true)
+    if (!probe.ok) {
+      await askDialog({ title: "没有读到登录态", body: String(probe.error || "未知原因"), okText: "知道了", cancelText: "关闭" })
+      return
+    }
 
     const list = Array.isArray(probe.accounts) ? probe.accounts : []
-    if (list.length === 0) return toast("客户端里没有可用账号", true)
+    if (list.length === 0) {
+      await askDialog({ title: "没有可用账号", body: "客户端里没找到有效登录态。", okText: "知道了", cancelText: "关闭" })
+      return
+    }
 
-    const lines = list
-      .map((x) => {
-        const tag = x.isCurrent ? "★ 当前登录" : "　"
-        return `${tag}  ${x.username}（积分 ${fmtNum(x.quota)}${x.wechatBound ? " · 已绑微信" : ""}${x.hasModelToken ? "" : " · 无模型token"}）`
-      })
-      .join("\n")
     const cur = probe.currentLogin ? String(probe.currentLogin.username ?? "") : ""
-    const head = cur ? `当前客户端登录的是：${cur}\n\n` : ""
-    if (!confirm(`${head}在本机客户端里共找到 ${list.length} 个已登录账号：\n\n` + lines + "\n\n要全部导入到面板吗？")) return
+    const rows = list
+      .map((x) => {
+        const star = x.isCurrent ? '<span class="cur">★ 当前登录</span>' : "　"
+        const w = x.wechatBound ? " · 已绑微信" : ""
+        const m = x.hasModelToken ? "" : " · 无模型token"
+        return `${star}  ${esc(x.username)}（积分 ${fmtNum(x.quota)}${w}${m}）`
+      })
+      .join("<br>")
+      const body = (cur ? `当前客户端登录的是：<b>${esc(cur)}</b><br><br>` : "") +
+      `共找到 ${list.length} 个已登录账号：<br><br>${rows}`
+
+    const go = await askDialog({
+      title: "桌面端登录态",
+      html: true,
+      body,
+      okText: "全部导入",
+      cancelText: "取消",
+    })
+    if (!go) return
 
     const done = await api("/api/accounts/from-desktop", { dryRun: false })
     if (done.ok) {
       const n = (done.imported || []).length
       const f = (done.failed || []).length
-      const curName = probe.currentLogin ? String(probe.currentLogin.username ?? "") : ""
-      toast(`已导入 ${n} 个账号` + (f ? `，${f} 个跳过` : "") + (curName ? `（当前登录：${curName}）` : ""))
-      if (f) {
-        $("accounts-cache-note").textContent = "跳过：" + done.failed.map((x) => `${x.username}（${x.reason}）`).join("；")
-      }
+      await askDialog({
+        title: "导入完成",
+        body: `已导入 ${n} 个账号` + (f ? `，跳过 ${f} 个` : "") + (cur ? `\n当前登录：${cur}` : ""),
+        okText: "好",
+        cancelText: "关闭",
+      })
       await loadAccounts()
     } else {
-      toast(String(done.error || "导入失败"), true)
+      await askDialog({ title: "导入失败", body: String(done.error || "未知原因"), okText: "知道了", cancelText: "关闭" })
     }
+  } catch (e) {
+    toast("读取失败：" + String(e?.message ?? e), true)
   } finally {
     btn.disabled = false
+    btn.textContent = label
   }
 })
 
