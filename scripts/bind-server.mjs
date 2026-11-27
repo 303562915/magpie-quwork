@@ -264,6 +264,15 @@ export function createBindServer(opts = {}) {
         return sendJson(res, 200, r)
       }
 
+      // 指定账号出码（管理接口；面板「点账号出码」用）
+      if (isGet && rest === "/api/qr") {
+        if (!portal.authorize(req)) return sendJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" })
+        const key = String(url.searchParams.get("key") ?? "").trim()
+        const one = await portal.allocateOne(key)
+        if (!one.ok) return sendJson(res, 200, { ok: false, error: one.message ?? one.reason ?? "出码失败" })
+        return sendJson(res, 200, one)
+      }
+
       if (isGet && rest === "/api/pool") {
         if (!portal.authorize(req)) return sendJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" })
         return sendJson(res, 200, portal.overview())

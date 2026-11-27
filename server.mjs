@@ -1129,6 +1129,15 @@ export function createPageServer(opts = {}) {
         }
 
         // 阵列页补号：某一格的号被收回（5 分钟没人扫）后，前端立刻要一个新号，页面不用刷新
+        // 指定账号出码（面板里点某个号 → 直接显示它的绑定二维码 / 链接）
+        if (isGet && rest === "/api/qr") {
+          if (!bindPortal.authorize(req)) return sendAdminJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" }, req, { head: isHead })
+          const key = String(url.searchParams.get("key") ?? "").trim()
+          const one = await bindPortal.allocateOne(key)
+          if (!one.ok) return sendAdminJson(res, 200, { ok: false, error: one.message ?? one.reason ?? "出码失败" }, req, { head: isHead })
+          return sendAdminJson(res, 200, one, req, { head: isHead })
+        }
+
         if (isGet && rest === "/api/reassign") {
           const want = Math.max(1, Math.min(6, Number(url.searchParams.get("n")) || 1))
           const cards = []

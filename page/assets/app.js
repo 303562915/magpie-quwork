@@ -232,6 +232,7 @@ function renderAccounts(data) {
         <td>${a.models == null ? "—" : fmtNum(a.models)}</td>
         <td class="row-actions">
           <button class="tiny" data-act="refresh" data-key="${esc(a.key)}">刷新</button>
+          <button class="tiny" data-act="qr" data-key="${esc(a.key)}">出码</button>
           <button class="tiny" data-act="copy" data-key="${esc(a.key)}">复制 token</button>
           ${st.text === "需绑微信" ? `<button class="tiny primary" data-act="wechat" data-key="${esc(a.key)}">绑定微信</button>` : ""}
           <button class="tiny danger" data-act="delete" data-key="${esc(a.key)}">删除</button>
@@ -299,6 +300,9 @@ $("accounts-body")?.addEventListener("click", async (e) => {
     }
     return
   }
+  if (act === "qr") {
+    return showQrRow(el, key)
+  }
   if (act === "wechat") {
     return openWechatPanel(key)
   }
@@ -327,6 +331,92 @@ $("check-all")?.addEventListener("change", (e) => {
 // ⚠ redirect_uri 必须是已备案域名，不能指向 127.0.0.1，所以「粘贴回调」是必须的一步。
 
 const wechatState = { key: "" }
+
+/**
+ * 点「出码」→ 在账号行下面就地展开这个号的绑定二维码（再点一次收起）。
+ *
+ * # 为什么要有「指定账号出码」
+ *
+ * 门户（`/bind/go`）是「随便给我一个还没绑的号」，操作者不知道给的是哪一个；
+ * 在面板里点某个号，要的就是**这个**号 —— 走 `/bind/api/qr?key=…`：
+ * 先实测 `/api/user/self`（已绑的直接拒绝，别让人白扫），再取平台签发的 state 出码，
+ * 并且登记会话，所以下面「查一次状态」能看到它是否绑上了。
+ *
+ * 二维码下面给三样东西：授权链接（可复制发给别人，他用浏览器打开就出码）、
+ * 会话编号（对账用）、有效期（10 分钟，与微信 code / wechat_token 对齐）。
+ *
+ * @param {HTMLButtonElement} btn
+ * @param {string} key
+ */
+async function showQrRow(btn, key) {
+  const tr = btn.closest("tr")
+  if (!tr) return
+  const opened = tr.nextElementSibling
+  if (opened && opened.classList.contains("qr-row")) {
+    opened.remove()
+    return
+  }
+
+  btn.disabled = true
+  try {
+    const d = await api(`/bind/api/qr?key=${encodeURIComponent(key)}`)
+    if (!d.ok) {
+      toast(String(d.error || "出码失败"), true)
+      return
+    }
+
+    const row = document.createElement("tr")
+    row.className = "qr-row"
+    row.innerHTML = `<td colspan="7">
+      <div class="qr-box">
+        <img class="qr-img" src="${esc(d.qr || "")}" alt="微信扫码绑定 ${esc(d.label || "")}" width="200" height="200">
+        <div class="qr-side">
+          <p class="big">${esc(d.label)} · 待绑定</p>
+          <p class="hint">手机微信「扫一扫」扫左边这张（相册 / 长按识别无效），再点「确认登录」。</p>
+          <p class="hint">有效期 ${Math.round((Number(d.ttlMs) || 0) / 1000)} 秒 · 会话 <span class="mono">${esc(d.sessionId)}</span></p>
+          <div class="toolbar-actions">
+            <button class="tiny" data-qr="copy">复制授权链接</button>
+            <button class="tiny" data-qr="poll">查一次状态</button>
+            <button class="tiny danger" data-qr="close">收起</button>
+          </div>
+          <p class="hint" data-qr="status">等待扫码…</p>
+        </div>
+      </div>
+    </td>`
+    tr.after(row)
+
+    const status = row.querySelector('[data-qr="status"]')
+    row.querySelector('[data-qr="close"]').addEventListener("click", () => row.remove())
+    row.querySelector('[data-qr="copy"]').addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(String(d.authorizeUrl ?? ""))
+        toast("授权链接已复制，发给别人用浏览器打开即可出码")
+      } catch {
+        toast("复制失败：请手动选中下面的链接复制", true)
+        status.textContent = String(d.authorizeUrl ?? "")
+      }
+    })
+    row.querySelector('[data-qr="poll"]').addEventListener("click", async () => {
+      try {
+        const st = await api(`/bind/api/check?session=${encodeURIComponent(d.sessionId)}`)
+        status.textContent =
+          st.status === "bound"
+            ? "✅ 已绑定"
+            : st.status === "expired"
+              ? "⏳ 已过期，重新点「出码」"
+              : `等待中…${st.message ? "（" + st.message + "）" : ""}`
+        if (st.status === "bound") {
+          toast("这个号已绑定成功")
+          void loadAccounts()
+        }
+      } catch (e) {
+        status.textContent = `查询失败：${String(e?.message ?? e)}`
+      }
+    })
+  } finally {
+    btn.disabled = false
+  }
+}
 
 function openWechatPanel(key) {
   const acc = state.accounts.find((a) => a.key === key)

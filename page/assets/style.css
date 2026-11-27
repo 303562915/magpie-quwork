@@ -161,3 +161,9 @@ small { display: block; font-size: 11px; color: var(--muted); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; }
 }
+
+/* 行内展开的绑定二维码（点账号行「出码」） */
+.qr-row td { background: var(--soft); }
+.qr-box { display: flex; gap: 16px; align-items: flex-start; padding: 10px 4px; flex-wrap: wrap; }
+.qr-img { border-radius: 10px; background: #fff; padding: 6px; border: 1px solid var(--line); }
+.qr-side { min-width: 240px; display: flex; flex-direction: column; gap: 4px; }

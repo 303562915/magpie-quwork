@@ -519,6 +519,95 @@ export function createBindPortal(opts) {
     },
 
     /**
+     * **指定账号**出码（面板里点某个号 → 直接拿它的绑定二维码）。
+     *
+     * # 和 `allocate()` 的区别
+     *
+     *	· `allocate()` 是「随便给我一个未绑的号」——门户用；
+     *	· `allocateOne(key)` 是「我就要这个号」——面板用，操作者自己知道要绑哪个。
+     *
+     * 共同点：都先**实测** `/api/user/self`，已绑的直接拒绝（别让人白扫）；
+     * 都会登记会话，所以页面能轮询到「已绑定」，并且这个号在占位期间别人抢不到。
+     *
+     * @param {string} key 账号 key（如 `quwork#3`）
+     * @returns {Promise<{ok: boolean, reason?: string, message?: string, key?: string, label?: string,
+     *   sessionId?: string, authorizeUrl?: string, state?: string, qr?: string, ttlMs?: number}>}
+     */
+    async allocateOne(key) {
+      sweep()
+      const want = String(key ?? "").trim()
+      if (!want) return { ok: false, reason: "missing-key", message: "没有指定账号" }
+
+      const entries = listPoolTokens(configDir)
+      const idx = entries.findIndex((a) => a.key === want)
+      if (idx < 0) return { ok: false, reason: "unknown-key", message: `池子里没有这个账号：${want}` }
+      const target = entries[idx]
+      const token = String(target.token ?? "").trim()
+      if (!token) return { ok: false, reason: "no-token", message: "这个账号没有平台 token" }
+
+      // 这个号正在被别人（门户里的某个会话）扫着？别抢
+      const held = locks.get(want)
+      if (held) {
+        const s = sessions.get(held)
+        if (s && s.status === "pending" && now() <= s.expiresAt) {
+          return { ok: false, reason: "locked", message: "这个号正被别的扫码页面占着，稍等或先清占用" }
+        }
+        locks.delete(want)
+      }
+
+      // 先实测：已经绑过就不要出码（否则扫了也白扫）
+      const self = await fetchSelf({ platformBaseUrl, token, fetchImpl })
+      if (!self.ok) return { ok: false, reason: "upstream", message: self.message ?? "读账号状态失败" }
+      if (self.wechatBound) {
+        markBound(want, { wechatId: self.wechatId })
+        return {
+          ok: false,
+          reason: "already-bound",
+          message: `这个号已经绑过微信（${self.wechatId ? "id " + String(self.wechatId).slice(0, 8) + "…" : "wechat_bound=true"}）`,
+        }
+      }
+
+      const got = await fetchAuthorizeUrl({ platformBaseUrl, token, fetchImpl })
+      if (!got.ok || !got.state) return { ok: false, reason: "upstream", message: got.message ?? "取授权地址失败" }
+
+      const sessionId = randomUUID().replace(/-/g, "").slice(0, 12)
+      /** @type {{sessionId: string, key: string, state: string, authorizeUrl: string,
+       *   issuedAt: number, expiresAt: number, status: "pending"|"bound"|"expired", lastSeenAt: number}} */
+      const session = {
+        sessionId,
+        key: want,
+        state: got.state,
+        authorizeUrl: String(got.url),
+        issuedAt: now(),
+        expiresAt: now() + sessionTtlMs,
+        status: "pending",
+        lastSeenAt: now(),
+      }
+      sessions.set(sessionId, session)
+      locks.set(want, sessionId)
+
+      let qr = ""
+      if (qrPngImpl) {
+        try {
+          qr = `data:image/png;base64,${qrPngImpl(session.authorizeUrl, { ecl: "L", scale: 8, border: 4 }).toString("base64")}`
+        } catch {
+          qr = ""
+        }
+      }
+
+      return {
+        ok: true,
+        key: want,
+        label: labelOf(entries.map((a) => a.key), want),
+        sessionId,
+        authorizeUrl: session.authorizeUrl,
+        state: session.state,
+        qr,
+        ttlMs: sessionTtlMs,
+      }
+    },
+
+    /**
      * 分配一个账号并给出它的授权码。
      *
      * 分配顺序：快照里未绑 → 没被占位 → **实测**未绑（`/api/user/self`）→ 拿得到授权地址。

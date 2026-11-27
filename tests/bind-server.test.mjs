@@ -407,3 +407,36 @@ test("B13 bind-batch：给未绑号批量出码，已绑的跳过，产出可打
   assert.match(csv, /编号,账号key,手机号尾号,state/)
   assert.match(csv, /quwork#2/, "对照表里要有真实 key（只给自己看）")
 })
+
+test("B14 /bind/api/qr?key=…：指定账号出码（管理鉴权；已绑的返回 ok:false）", async (t) => {
+  const platform = fakeFetch(["tok-a"]) // tok-a 已绑
+  const dir = tempDir(t)
+  upsertAccount(dir, { llmToken: "sk-a", token: "tok-a", uid: "u1" })
+  upsertAccount(dir, { llmToken: "sk-b", token: "tok-b", uid: "u2" })
+
+  const server = createBindServer({
+    configDir: dir, platformBaseUrl: PLATFORM, fetchImpl: platform.fetchImpl,
+    wallWindowMs: 0, allocateWindowMs: 0, checkWindowMs: 0, log: { warn() {} },
+  })
+  await new Promise((done) => server.listen(0, "127.0.0.1", done))
+  const base = `http://127.0.0.1:${server.address().port}`
+  t.after(() => new Promise((done) => server.close(() => done())))
+
+  // 已绑的号被拒绝
+  const bad = await fetch(`${base}/bind/api/qr?key=quwork`).then((r) => r.json())
+  assert.equal(bad.ok, false)
+  assert.match(String(bad.error ?? ""), /已经绑过微信/)
+
+  // 未绑的号出码
+  const good = await fetch(`${base}/bind/api/qr?key=quwork%231`).then((r) => r.json())
+  assert.equal(good.ok, true)
+  assert.equal(good.label, "#2")
+  assert.ok(String(good.qr).startsWith("data:image/png;base64,"))
+  assert.ok(String(good.authorizeUrl).includes(good.state))
+})
+
+test("B14b /bind/api/qr 也要鉴权（不能给公网裸奔）", async (t) => {
+  const { base } = await start(t, { adminToken: "s3cret" })
+  assert.equal((await fetch(`${base}/bind/api/qr?key=quwork#1`)).status, 401)
+  assert.equal((await fetch(`${base}/bind/api/qr?key=quwork#1`, { headers: { authorization: "Bearer s3cret" } })).status, 200)
+})

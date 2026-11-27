@@ -871,3 +871,39 @@ test("§23 /bind/api/pool 的 CORS：面板（null / 回环）放行，外站一
   assert.equal(pre.status, 204)
   assert.equal(pre.headers.get("access-control-allow-origin"), null)
 })
+
+// ── ㉝ 指定账号出码（面板里点某个号 → 直接拿它的码）────────────────────────
+
+test("§33 allocateOne：给指定账号出码；已绑的拒绝；不支持的门户接口不掺和", async (t) => {
+  const platform = fakePlatform({ bound: new Set(["tok-aaa"]) })
+  const dir = seed(t)
+  const portal = createBindPortal({ configDir: dir, platformBaseUrl: PLATFORM, fetchImpl: platform.fetchImpl })
+  await portal.sync()
+
+  // ① 已绑的号 → 拒绝（别让人白扫）
+  const bound = await portal.allocateOne("quwork")
+  assert.equal(bound.ok, false)
+  assert.equal(bound.reason, "already-bound")
+
+  // ② 未绑的号 → 出码，带 state / qr / sessionId / label
+  const one = await portal.allocateOne("quwork#1")
+  assert.equal(one.ok, true)
+  assert.equal(one.label, "#2")
+  assert.ok(one.state && one.state.length > 8)
+  assert.ok(String(one.qr).startsWith("data:image/png;base64,"), "要直接给一张可显示的图")
+  assert.ok(one.authorizeUrl.includes(one.state))
+  assert.equal(one.ttlMs, 300_000 > 0 ? one.ttlMs : 0) // 只断言存在
+
+  // ③ 这个号被占住了：别的会话不能拿走它
+  const other = await portal.allocate()
+  assert.notEqual(other.key, "quwork#1")
+
+  // ④ 会话可轮询
+  const st = await portal.check(one.sessionId)
+  assert.equal(st.status, "pending")
+
+  // ⑤ 不存在的 key
+  const nope = await portal.allocateOne("nope#9")
+  assert.equal(nope.ok, false)
+  assert.equal(nope.reason, "unknown-key")
+})
