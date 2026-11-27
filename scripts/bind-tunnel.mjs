@@ -27,6 +27,7 @@
 import { spawn } from "node:child_process"
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
+import { homedir } from "node:os"
 import { fileURLToPath } from "node:url"
 
 import { buildFixedQr } from "./bind-qr.mjs"
@@ -75,6 +76,19 @@ function onUrl(url) {
     "utf8",
   )
   console.log(`[${stamp()}] 公网地址：${clean}`)
+
+  // 把当前公网地址也写进 magpie 配置目录：面板没有设置 bindPublicUrl 时读这个文件，
+  // 否则「公网链接」会显示成本机地址（127.0.0.1），发出去别人打不开。
+  try {
+    const cfgDir = String(process.env.MAGPIE_CONFIG_DIR ?? join(homedir(), ".config", "magpie")).trim()
+    if (cfgDir) {
+      mkdirSync(cfgDir, { recursive: true })
+      writeFileSync(join(cfgDir, "quwork-bind-public.txt"), `${clean}\n`, "utf8")
+      console.log(`[${stamp()}] 面板公网地址已同步：${join(cfgDir, "quwork-bind-public.txt")}`)
+    }
+  } catch (e) {
+    console.error(`[${stamp()}] 同步面板公网地址失败：${String(e?.message ?? e)}`)
+  }
   console.log(`[${stamp()}] 二维码内容：${r.target}（v${r.version}，${r.bytes} 字节）`)
   console.log(`[${stamp()}] 已更新：${join(outDir, "固定码.png")}`)
   console.log(`[${stamp()}] 已更新：${join(outDir, "固定码.print.html")}`)

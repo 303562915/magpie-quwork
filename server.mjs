@@ -72,6 +72,16 @@ function readJsonFile(file) {
   }
 }
 
+/** 读一个纯文本文件（不存在/读失败 → 空串，不抛）。 */
+function readTextFile(file) {
+  try {
+    if (!existsSync(file)) return ""
+    return String(readFileSync(file, "utf8")).trim()
+  } catch {
+    return ""
+  }
+}
+
 /** 原子写 JSON（先写临时文件再 rename）。 */
 function writeJsonFile(file, obj) {
   try {
@@ -410,6 +420,8 @@ export function createPageServer(opts = {}) {
   const bindFixedBase = (req) =>
     normalizePublicUrl(bindPublicBaseUrl) ||
     normalizePublicUrl(readJsonFile(settingsFile())?.bindPublicUrl) ||
+    // 隧道脚本会把当前公网地址写到这里；没有设置项时用它，免得「公网链接」显示成本机地址
+    normalizePublicUrl(readTextFile(join(configDir, "quwork-bind-public.txt"))) ||
     requestOrigin(req, "")
   const inviteCacheFile = () => join(configDir, "quwork-invite-cache.json")
   const rewardCacheFile = () => join(configDir, "quwork-reward-cache.json")
