@@ -1245,6 +1245,8 @@ export function createPageServer(opts = {}) {
         if (name === "reward/status") return json(200, await api.rewardStatus())
         if (name === "reward/gifts") return json(200, await api.gifts({ key: url.searchParams.get("key") }))
         if (name === "settings") return json(200, await api.settings())
+        // 绑定流程的监听日志（最近 300 条）：GET，只读
+        if (name === "wechat/log") return json(200, { ok: true, entries: bindLog })
         return json(404, { ok: false, error: "未知接口" })
       }
 
