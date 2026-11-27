@@ -34,6 +34,61 @@ const MAX_FILE_BYTES = 8 * 1024 * 1024
 const MAX_DEPTH = 6
 
 /**
+ * 从客户端存储里认出**现在登录的是哪个账号**。
+ *
+ * # 判据
+ *
+ * 客户端的 localStorage 里每个站点会写一条：
+ *	{"is_login":true,"user_id":"19156057259", …}
+ * leveldb 的日志文件是**追加写**的，所以**最后出现**的那条就是最近一次登录。
+ * 同一条记录里还带着完整 `user` JSON（display_name / id），拿它和手机号对得上。
+ *
+ * @param {{files: string[], readFileImpl?: (p: string) => Buffer}} opts
+ * @returns {{userId: string, username: string} | null}
+ */
+export function detectCurrentLogin(opts) {
+  const readFileImpl = opts.readFileImpl ?? ((f) => readFileSync(f))
+  /** @type {{userId: string, username: string} | null} */
+  let last = null
+
+  // leveldb 的值有两种存法：UTF-8（响应体）与 UTF-16LE（localStorage 值）。
+  // **两种都要试** —— 真机上 `is_login` 是 UTF-16LE 的，只按 latin1 读一条都匹配不到。
+  const decodeAll = (buf) => [buf.toString("latin1"), buf.toString("utf16le")]
+
+  for (const file of opts.files) {
+    let bufs
+    try {
+      bufs = decodeAll(readFileImpl(file))
+    } catch {
+      continue
+    }
+    for (const text of bufs) {
+      const re = /"is_login"\s*:\s*true\s*,\s*"user_id"\s*:\s*"([^"]{4,32})"/g
+      for (const m of text.matchAll(re)) {
+        last = { userId: m[1], username: m[1] }
+      }
+    }
+  }
+  if (!last) return null
+
+  // 再补一次 display_name（同一个 user_id 在 user JSON 里出现过就用它）
+  for (const file of opts.files) {
+    let text
+    try {
+      text = readFileImpl(file).toString("latin1")
+    } catch {
+      continue
+    }
+    const re = new RegExp(`"display_name"\\s*:\\s*"([^"]{2,40})"[\\s\\S]{0,2000}?"id"\\s*:\\s*\\d+`, "g")
+    for (const m of text.matchAll(re)) {
+      // 只有当一个 display_name 能对上某个已登录 user_id 时才采用
+      if (m[1] === last.userId) last.username = m[1]
+    }
+  }
+  return last
+}
+
+/**
  * 客户端用户数据目录（按平台给默认值，可注入 env 便于测试）。
  *
  * @param {Record<string, string|undefined>} [env]
@@ -144,7 +199,16 @@ export function readFromDesktopClient(opts = {}) {
     }
   }
 
-  return { dirs, candidates: [...seen.values()] }
+  // 顺手认出「现在登录的是哪个账号」：只扫 Local/Session Storage 那几类文件
+  const loginFiles = []
+  for (const dir of dirs) {
+    for (const file of listFilesImpl(dir)) {
+      if (/Local Storage|Session Storage/i.test(file)) loginFiles.push(file)
+    }
+  }
+  const currentLogin = loginFiles.length > 0 ? detectCurrentLogin({ files: loginFiles, readFileImpl }) : null
+
+  return { dirs, candidates: [...seen.values()], currentLogin }
 }
 
 /**
@@ -325,5 +389,10 @@ export async function discoverFromDesktop(opts = {}) {
     accounts.push(row)
   }
 
-  return { ok: true, dirs, scanned: candidates.length, accounts }
+  // 标出「当前登录」并排到最前面（用户最关心的就是它）
+  const cur = readFromDesktopClient(opts).currentLogin
+  for (const a of accounts) a.isCurrent = Boolean(cur && (a.username === cur.username || String(a.userId) === cur.userId))
+  accounts.sort((x, y) => Number(y.isCurrent) - Number(x.isCurrent) || y.quota - x.quota)
+
+  return { ok: true, dirs, scanned: candidates.length, accounts, currentLogin: cur }
 }

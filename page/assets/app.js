@@ -1163,15 +1163,21 @@ on($("import-desktop"), async () => {
     if (list.length === 0) return toast("客户端里没有可用账号", true)
 
     const lines = list
-      .map((x) => `${x.username}  （积分 ${fmtNum(x.quota)}${x.wechatBound ? " · 已绑微信" : ""}${x.hasModelToken ? "" : " · 无模型token"}` + "）")
+      .map((x) => {
+        const tag = x.isCurrent ? "★ 当前登录" : "　"
+        return `${tag}  ${x.username}（积分 ${fmtNum(x.quota)}${x.wechatBound ? " · 已绑微信" : ""}${x.hasModelToken ? "" : " · 无模型token"}）`
+      })
       .join("\n")
-    if (!confirm(`在本机客户端里找到 ${list.length} 个已登录账号：\n\n` + lines + "\n\n要导入到面板吗？")) return
+    const cur = probe.currentLogin ? String(probe.currentLogin.username ?? "") : ""
+    const head = cur ? `当前客户端登录的是：${cur}\n\n` : ""
+    if (!confirm(`${head}在本机客户端里共找到 ${list.length} 个已登录账号：\n\n` + lines + "\n\n要全部导入到面板吗？")) return
 
     const done = await api("/api/accounts/from-desktop", { dryRun: false })
     if (done.ok) {
       const n = (done.imported || []).length
       const f = (done.failed || []).length
-      toast(`已导入 ${n} 个账号` + (f ? `，${f} 个跳过` : ""))
+      const curName = probe.currentLogin ? String(probe.currentLogin.username ?? "") : ""
+      toast(`已导入 ${n} 个账号` + (f ? `，${f} 个跳过` : "") + (curName ? `（当前登录：${curName}）` : ""))
       if (f) {
         $("accounts-cache-note").textContent = "跳过：" + done.failed.map((x) => `${x.username}（${x.reason}）`).join("；")
       }

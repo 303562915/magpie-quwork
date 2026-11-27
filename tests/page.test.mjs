@@ -949,3 +949,63 @@ test("T-DESKTOP-4) 面板有「桌面端登录态」按钮，且走两段式（�
   assert.match(js, /dryRun:\s*true/, "先探测不写文件")
   assert.match(js, /dryRun:\s*false/, "确认后再写")
 })
+
+test("T-DESKTOP-5) detectCurrentLogin：按 UTF-16LE 与 UTF-8 两种存法都能认出「现在登录的账号」", async () => {
+  const { detectCurrentLogin } = await import("../src/desktop-client.mjs")
+  const rec = (id) => Buffer.from(`\u0000_https://llm.rrzu.com\u0000user\u0000{"is_login":true,"user_id":"${id}"}`, "utf16le")
+  // 后写的（19156057259）应该盖掉先写的（17301180496）
+  const buf = Buffer.concat([rec("17301180496"), rec("19156057259")])
+  const got = detectCurrentLogin({ files: ["a"], readFileImpl: () => buf })
+  assert.equal(got?.userId, "19156057259", "取最后一次登录")
+  assert.equal(got?.username, "19156057259")
+
+  // UTF-8 存的也要认（HTTP 响应缓存里是 UTF-8）
+  const utf8 = Buffer.from('{"is_login":true,"user_id":"17028234073"}', "latin1")
+  assert.equal(detectCurrentLogin({ files: ["b"], readFileImpl: () => utf8 })?.userId, "17028234073")
+
+  // 一条都没有 → null
+  assert.equal(detectCurrentLogin({ files: ["c"], readFileImpl: () => Buffer.from("nothing") }), null)
+})
+
+test("T-DESKTOP-6) 探测结果里带 currentLogin，并把当前登录的账号排在最前", async (t) => {
+  const { discoverFromDesktop } = await import("../src/desktop-client.mjs")
+  const root = tempDir(t)
+  const dir = join(root, "qurwork-desktop")
+  mkdirSync(join(dir, "Local Storage", "leveldb"), { recursive: true })
+
+  const jwtA = "eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJycnotbGxtIiwidXNlcl9pZCI6MX0.aaa"
+  const jwtB = "eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJycnotbGxtIiwidXNlcl9pZCI6Mn0.bbb"
+  const ldb = join(dir, "Local Storage", "leveldb", "000003.log")
+  const files = {
+    [ldb]: Buffer.concat([
+      Buffer.from(`${jwtA}|${jwtB}|`, "latin1"),
+      Buffer.from('{"is_login":true,"user_id":"22222222222"}', "utf16le"),
+    ]),
+  }
+
+  const fetchImpl = async (url, init) => {
+    const u = String(url)
+    const tok = String(new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer\s+/i, "")
+    if (u.includes("/api/user/self")) {
+      const id = tok === jwtA ? 1 : 2
+      const name = id === 1 ? "11111111111" : "22222222222"
+      return Response.json({ success: true, data: { id, username: name, quota: 100, wechat_bound: false } })
+    }
+    if (u.includes("/api/token")) return Response.json({ success: true, data: [{ status: 1, key: "k".repeat(48) }] })
+    return Response.json({ success: true, data: {} })
+  }
+
+  const r = await discoverFromDesktop({
+    env: { APPDATA: root },
+    platformBaseUrl: "https://p.example",
+    fetchImpl,
+    listFilesImpl: (d) => (d === dir ? [ldb] : []),
+    readFileImpl: (f) => files[f] ?? Buffer.alloc(0),
+  })
+
+  assert.equal(r.ok, true)
+  assert.equal(r.currentLogin?.userId, "22222222222")
+  assert.equal(r.accounts[0].username, "22222222222", "当前登录排第一")
+  assert.equal(r.accounts[0].isCurrent, true)
+  assert.equal(r.accounts[1].isCurrent, false)
+})
