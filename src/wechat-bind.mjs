@@ -1161,7 +1161,12 @@ export function createBindPortal(opts) {
           message: `平台暂时读不到状态（${self.message ?? "未知"}）`,
         }
       }
-      return { status: "pending", remainingMs: Math.max(0, s.expiresAt - now()) }
+      return {
+        status: "pending",
+        label,
+        remainingMs: Math.max(0, s.expiresAt - now()),
+        ...(s.scanState ? { scanState: s.scanState, attempts: s.attempts ?? 0 } : {}),
+      }
     },
 
     /**
