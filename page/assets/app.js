@@ -1062,7 +1062,7 @@ function renderBind(data) {
   // 记下最近一次数据：切换筛选时直接重绘，不用再打一次上游
   state.bindData = data
   const allAccounts = Array.isArray(data?.accounts) ? data.accounts : []
-  const filter = $("bind-filter")?.value || "all"
+  const filter = $("bind-filter")?.value || "24h"
   const accounts = allAccounts.filter((x) => {
     if (filter === "today") return x.registeredToday === true
     if (filter === "24h") return x.inviteEligible === true
@@ -1094,7 +1094,13 @@ function renderBind(data) {
           </tr>`
         })
         .join("")
-    : `<tr><td colspan="5"><div class="empty">没有 quwork 账号（先在账号页添加）</div></td></tr>`
+    : `<tr><td colspan="5"><div class="empty">` +
+      (filter === "24h"
+        ? "没有「24 小时内注册」的账号。邀请码只认这个窗口；老号绑微信后只能签到，补不了邀请。<br>要把老号绑上微信做签到，把上面的筛选切到「全部未绑」。"
+        : filter === "today"
+          ? "今天没有新注册的账号。"
+          : "没有 quwork 账号（先在账号页添加）") +
+      "</div></td></tr>"
 }
 
 async function loadBindPool() {

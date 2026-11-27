@@ -1027,3 +1027,19 @@ test("T-DESKTOP-7) 面板用页面内弹窗，不依赖原生 confirm（沙盒�
   const css = await (await fetch(`${base}/assets/style.css`)).text()
   assert.match(css, /\.dlg-mask/, "要有弹窗样式")
 })
+
+test("T-BINDFILTER-1) 扫码绑定页默认筛选是「24h 内（可补邀请）」，不是全部", async (t) => {
+  const { base } = await startRecording(t)
+  const html = await (await fetch(`${base}/`)).text()
+  assert.match(html, /id="bind-filter"/, "要有筛选")
+  // 默认选中 24h
+  const sel = html.slice(html.indexOf('id="bind-filter"'), html.indexOf("</select>", html.indexOf('id="bind-filter"')))
+  assert.match(sel, /<option value="24h" selected>/, "24h 必须是默认项")
+  // 24h 排第一
+  const order = [...sel.matchAll(/value="(\w+)"/g)].map((m) => m[1])
+  assert.deepEqual(order, ["24h", "today", "all"], "顺序应是 24h / today / all")
+
+  const js = await (await fetch(`${base}/assets/app.js`)).text()
+  assert.match(js, /\|\| "24h"/, "JS 兜底也必须是 24h")
+  assert.match(js, /邀请码只认这个窗口/, "空态要解释清楚")
+})
