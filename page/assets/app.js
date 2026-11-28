@@ -8,6 +8,20 @@
 const $ = (id) => document.getElementById(id)
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c])
 const fmtNum = (n) => (n == null || n === "" ? "—" : Number(n).toLocaleString("zh-CN"))
+
+/**
+ * 平台 `quota` 是**原始额度单位**，不是积分。
+ *
+ * `/api/status` 里 `quota_per_unit = 500000`（即 500000 = $1），
+ * 所以 5,000,000 其实是 **$10.00**。直接显示原始数字没人看得懂，这里换算成美元。
+ */
+const QUOTA_PER_UNIT = 500000
+const fmtQuota = (q) => {
+  if (q == null || q === "") return "—"
+  const n = Number(q)
+  if (!Number.isFinite(n)) return "—"
+  return `$${(n / QUOTA_PER_UNIT).toFixed(2)}`
+}
 const fmtTime = (sec) => {
   const n = Number(sec) || 0
   if (!n) return "—"
@@ -696,7 +710,7 @@ function renderInvite(data) {
         "<td>" + code + "</td>" +
         "<td>" + (x.invitedCount == null ? "—" : fmtNum(x.invitedCount)) + "</td>" +
         "<td>" + (x.points == null ? "—" : fmtNum(x.points)) + "</td>" +
-        "<td>" + (x.quota == null ? "—" : fmtNum(x.quota)) + "</td>" +
+        "<td title=\"" + (x.quota == null ? "" : fmtNum(x.quota) + " quota") + "\">" + fmtQuota(x.quota) + "</td>" +
         "<td>" + (x.at ? fmtAgo(x.at) : "无缓存") + "</td>" +
         '<td class="row-actions">' +
         '<button class="tiny" data-iact="read" data-key="' + esc(x.key) + '">读取</button>' +
@@ -1134,8 +1148,7 @@ function bindStateCell(a) {
   return { text: "未绑（可分配）", cls: "warn" }
 }
 
-/** 24 小时邀请窗口的截止时间（毫秒）。没有注册时间 → 0。 */
-const BIND_WINDOW_MS = 24 * 60 * 60 * 1000
+/** 24 小时邀请窗口的截止时间（毫秒）。没有注册时间 → 0。 */const BIND_WINDOW_MS = 24 * 60 * 60 * 1000
 function bindDeadline(createdTime) {
   const t = Number(createdTime) || 0
   return t > 0 ? t * 1000 + BIND_WINDOW_MS : 0
@@ -1192,7 +1205,7 @@ function renderBind(data) {
           return `<tr>
             <td>${esc(a.label ?? a.key)}${a.phone ? `<small class="mono">${esc(a.phone)}</small>` : ""}</td>
             <td><span class="pill ${st.cls}">${esc(st.text)}</span></td>
-            <td>${fmtNum(a.quota)}</td>
+            <td title="${a.quota == null ? "" : fmtNum(a.quota) + " quota"}">${fmtQuota(a.quota)}</td>
             <td>
               ${a.createdTime ? esc(new Date(a.createdTime * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })) : "—"}
               ${(() => {
