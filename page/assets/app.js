@@ -1337,6 +1337,108 @@ on($("auto-invite-now"), async () => {
   await loadAutoInvite()
 })
 
+
+// ── 绑定播报：微信绑定 / 邀请码绑定 各自一个声音 ──────────────────────────
+
+/** 懒建 AudioContext（浏览器要求先有用户手势，所以第一次点击时才真正解锁）。 */
+let bindAudio = null
+function bindAudioCtx() {
+  try {
+    if (!bindAudio) {
+      const Ctx = window.AudioContext || window.webkitAudioContext
+      if (!Ctx) return null
+      bindAudio = new Ctx()
+    }
+    if (bindAudio.state === "suspended") void bindAudio.resume()
+    return bindAudio
+  } catch {
+    return null
+  }
+}
+document.addEventListener("click", () => bindAudioCtx(), { once: true })
+
+/**
+ * 播报一声。
+ *
+ * 两种事件给不同的音阶，闭着眼也能分清：
+ *   wechat  = 上行两声（微信绑好了）
+ *   invite  = 下行两声（邀请码绑好了）
+ */
+function bindBeep(kind) {
+  const ctx = bindAudioCtx()
+  if (!ctx) return
+  const seq = kind === "wechat" ? [880, 1180] : [760, 540]
+  seq.forEach((freq, i) => {
+    const t0 = ctx.currentTime + i * 0.16
+    const osc = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.type = "sine"
+    osc.frequency.value = freq
+    gain.gain.setValueAtTime(0.0001, t0)
+    gain.gain.exponentialRampToValueAtTime(0.22, t0 + 0.02)
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.14)
+    osc.connect(gain).connect(ctx.destination)
+    osc.start(t0)
+    osc.stop(t0 + 0.16)
+  })
+}
+
+/** 已经播报过的时间戳，避免重复响。 */
+const bindSeen = { wechat: 0, invite: 0, primed: false }
+
+/**
+ * 盯绑定结果：轮询本地接口（不打上游），发现**新的**成功事件就响一声。
+ *
+ * 首次取到的历史事件只记时间不响，否则一打开面板就炸一串声音。
+ */
+async function bindWatchOnce() {
+  if (document.hidden) return
+  try {
+    const [snap, auto] = await Promise.all([
+      api("/bind/api/sessions").catch(() => null),
+      api("/api/auto-invite").catch(() => null),
+    ])
+
+    const boundEvents = (snap?.events ?? []).filter((e) => e.type === "bound")
+    const latestBound = boundEvents.reduce((m, e) => Math.max(m, Number(e.at) || 0), 0)
+
+    const okInvites = (auto?.log ?? []).filter((e) => e.ok === true)
+    const latestInvite = okInvites.reduce((m, e) => Math.max(m, Number(e.at) || 0), 0)
+
+    if (!bindSeen.primed) {
+      bindSeen.wechat = latestBound
+      bindSeen.invite = latestInvite
+      bindSeen.primed = true
+      return
+    }
+
+    if (latestBound > bindSeen.wechat) {
+      bindSeen.wechat = latestBound
+      const last = boundEvents.filter((e) => Number(e.at) === latestBound).pop()
+      bindBeep("wechat")
+      toast("微信绑定成功：" + String(last?.label ?? last?.key ?? ""))
+      if (state.bindData) renderBind(state.bindData)
+    }
+
+    if (latestInvite > bindSeen.invite) {
+      bindSeen.invite = latestInvite
+      const last = okInvites.filter((e) => Number(e.at) === latestInvite).pop()
+      bindBeep("invite")
+      toast("邀请码绑定成功：" + String(last?.label ?? last?.key ?? "") + " → " + String(last?.inviteCode ?? ""))
+      renderAutoInvite(auto)
+    }
+  } catch {
+    /* 轮询失败安静跳过 */
+  }
+}
+
+/** 自排程轮询（不用 setInterval：面板规矩是不许 setInterval）。 */
+function bindWatchLoop() {
+  void bindWatchOnce()
+  setTimeout(bindWatchLoop, 6000)
+}
+setTimeout(bindWatchLoop, 6000)
+
 on($("bind-refresh"), loadBindPool)
 
 // 只换筛选条件时不必再打上游：用最近一次数据重绘即可
