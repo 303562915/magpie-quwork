@@ -176,10 +176,6 @@ footer { color: #9ca3af; font-size: 12px; }
  */
 function layout(opts) {
   const script = opts.script ? `<script>${opts.script}</script>` : ""
-  // 非微信内置浏览器访问时，顶部直接挂一条提示：这类访问扫码链路走不通
-  const notWeChat = opts.notWeChat
-    ? `<div class="alert" style="max-width:980px;margin:0 auto 14px">你现在<b>不是从微信里</b>打开本页<small>微信「扫一扫」扫码才会跳「确认登录」；直接点链接/用浏览器打开，绑不成</small></div>`
-    : ""
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -190,7 +186,6 @@ function layout(opts) {
 <style>${CSS}</style>
 </head>
 <body>
-${notWeChat}
 ${opts.body}
 <footer>微信扫码绑定</footer>
 ${script}
@@ -222,7 +217,7 @@ export function landingPage(opts = {}) {
   <a class="btn secondary" href="${esc(wall)}">看全部待绑定账号（群里发这个也行）</a>
   <p class="hint">当前可分配 <strong>${available}</strong> 个 · 已绑定 <strong>${bound}</strong> / 共 ${total} 个</p>
 </div>`
-  return layout({ title: "微信绑定", body, notWeChat: opts.notWeChat })
+  return layout({ title: "微信绑定", body })
 }
 
 /**
@@ -395,7 +390,7 @@ export function wallPage(opts = {}) {
   setInterval(tick, 1000);
 })();
 `
-  return layout({ title: "待绑定账号", body, script, notWeChat: opts.notWeChat })
+  return layout({ title: "待绑定账号", body, script })
 }
 
 /**
@@ -511,7 +506,7 @@ export function goPage(opts) {
   }, interval);
 })();
 `
-  return layout({ title: `绑定账号 ${opts.label ?? ""}`, body, script, notWeChat: opts.notWeChat })
+  return layout({ title: `绑定账号 ${opts.label ?? ""}`, body, script })
 }
 
 /**
