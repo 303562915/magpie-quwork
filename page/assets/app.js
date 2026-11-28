@@ -269,7 +269,7 @@ function renderAccounts(data) {
 
   const body = $("accounts-body")
   if (list.length === 0) {
-    body.innerHTML = '<tr><td colspan="8"><div class="empty">还没有 quwork 账号</div></td></tr>'
+    body.innerHTML = '<tr><td colspan="9"><div class="empty">还没有 quwork 账号</div></td></tr>'
     updateSelectionUi()
     return
   }
@@ -287,7 +287,12 @@ function renderAccounts(data) {
         <td>${(() => {
           const b = bindOf.get(a.key)
           if (!b) return '<span class="muted">—</span>'
-          return b ? '<span class="pill done">已绑</span>' : '<span class="pill warn">未绑</span>'
+          return b.wechatBound ? '<span class="pill done">已绑</span>' : '<span class="pill warn">未绑</span>'
+        })()}</td>
+        <td>${(() => {
+          const b = bindOf.get(a.key)
+          if (!b) return '<span class="muted">—</span>'
+          return b.inviteBound ? '<span class="pill done">已绑</span>' : '<span class="pill warn">未绑</span>'
         })()}</td>
         <td>${a.points == null ? "—" : fmtNum(a.points)}</td>
         <td>${esc(fmtTime(a.expires))}<small>${esc(leftText)}</small></td>
@@ -321,7 +326,10 @@ async function loadAccounts() {
     api("/bind/api/pool").catch(() => null),
   ])
   state.bindByKey = new Map(
-    (Array.isArray(pool?.accounts) ? pool.accounts : []).map((x) => [x.key, x.wechatBound === true]),
+    (Array.isArray(pool?.accounts) ? pool.accounts : []).map((x) => [
+      x.key,
+      { wechatBound: x.wechatBound === true, inviteBound: x.inviteBound === true },
+    ]),
   )
   renderAccounts(data)
   return data
@@ -435,7 +443,7 @@ async function showQrRow(btn, key) {
 
     const row = document.createElement("tr")
     row.className = "qr-row"
-    row.innerHTML = `<td colspan="8">
+    row.innerHTML = `<td colspan="9">
       <div class="qr-box">
         <img class="qr-img" src="${esc(d.qr || "")}" alt="微信扫码绑定 ${esc(d.label || "")}" width="200" height="200">
         <div class="qr-side">
@@ -705,7 +713,7 @@ function renderInvite(data) {
   const body = $("invite-body")
   if (view.length === 0) {
     body.innerHTML =
-      '<tr><td colspan="8"><div class="empty">' +
+      '<tr><td colspan="9"><div class="empty">' +
       (filter === "eligible"
         ? "现在没有「可激活邀请」的号（要已绑微信 + 注册 24 小时内）；切到「全部账号」看其它号"
         : "还没有 quwork 账号") +
@@ -953,7 +961,7 @@ function renderRewardStatus(data) {
 
   const body = $("reward-body")
   if (list.length === 0) {
-    body.innerHTML = '<tr><td colspan="8"><div class="empty">还没有 quwork 账号</div></td></tr>'
+    body.innerHTML = '<tr><td colspan="9"><div class="empty">还没有 quwork 账号</div></td></tr>'
     updateRewardSelectionUi()
     return
   }
@@ -1800,7 +1808,7 @@ on($("refresh-models"), async () => {
     // ⚠ 失败必须**看得见**：否则表格永远停在「加载中…」（真机踩过）
     const msg = String(e?.message ?? e)
     setStatus(msg, false)
-    $("accounts-body").innerHTML = `<tr><td colspan="8"><div class="empty bad">无法连接面板服务：${esc(msg)}</div></td></tr>`
+    $("accounts-body").innerHTML = `<tr><td colspan="9"><div class="empty bad">无法连接面板服务：${esc(msg)}</div></td></tr>`
     $("accounts-cache-note").textContent = "连接失败"
     for (const [id, cols] of [["invite-body", 8], ["records-body", 4], ["reward-body", 8], ["gifts-body", 4]]) {
       const el = $(id)
