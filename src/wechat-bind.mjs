@@ -325,13 +325,18 @@ function isWithin24h(seconds) {
 }
 
 export function poolOverview(opts) {
-  const keys = listPoolTokens(opts?.configDir).map((a) => a.key)
+  const entries = listPoolTokens(opts?.configDir)
+  const keys = entries.map((a) => a.key)
+  const phoneOf = new Map(entries.map((a) => [a.key, String(a.phone ?? "")]))
   const pool = readPool(opts?.configDir)
   const list = keys.map((key) => {
     const a = pool.accounts[key] ?? {}
     return {
       key,
       label: labelOf(keys, key),
+      // 面板是本机管理界面，显示手机号方便对上「这是谁的号」；
+      // 对外门户（/bind/*）仍然只给编号，不泄露手机号。
+      phone: phoneOf.get(key) ?? "",
       wechatBound: a.wechatBound === true,
       tokenInvalid: a.tokenInvalid === true,
       quota: Number.isFinite(a.quota) ? a.quota : null,

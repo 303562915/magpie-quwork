@@ -1120,6 +1120,39 @@ function bindStateCell(a) {
   return { text: "未绑（可分配）", cls: "warn" }
 }
 
+/** 24 小时邀请窗口的截止时间（毫秒）。没有注册时间 → 0。 */
+const BIND_WINDOW_MS = 24 * 60 * 60 * 1000
+function bindDeadline(createdTime) {
+  const t = Number(createdTime) || 0
+  return t > 0 ? t * 1000 + BIND_WINDOW_MS : 0
+}
+
+/**
+ * 距离截止还剩多久（人话）。
+ *
+ * 为什么要显示：24 小时窗口是邀请码唯一的机会，光看「24h内」不知道还剩几分钟，
+ * 容易拖到最后一刻才发现过期。这里给出「剩 3 小时 12 分」这种可以直接决策的写法。
+ *
+ * @returns {{text:string, cls:string}}
+ */
+function bindRemain(createdTime) {
+  const dl = bindDeadline(createdTime)
+  if (!dl) return { text: "", cls: "" }
+  const left = dl - Date.now()
+  if (left <= 0) return { text: "已过期", cls: "fail" }
+  const mins = Math.floor(left / 60000)
+  const d = Math.floor(mins / 1440)
+  const h = Math.floor((mins % 1440) / 60)
+  const m = mins % 60
+  let text
+  if (d > 0) text = `剩 ${d} 天 ${h} 小时`
+  else if (h > 0) text = `剩 ${h} 小时 ${m} 分`
+  else if (m > 0) text = `剩 ${m} 分`
+  else text = "剩不到 1 分"
+  const cls = left < 60 * 60 * 1000 ? "warn" : "ok"
+  return { text, cls }
+}
+
 function renderBind(data) {
   // 记下最近一次数据：切换筛选时直接重绘，不用再打一次上游
   state.bindData = data
@@ -1142,13 +1175,16 @@ function renderBind(data) {
         .map((a) => {
           const st = bindStateCell(a)
           return `<tr>
-            <td>${esc(a.label ?? a.key)}</td>
+            <td>${esc(a.label ?? a.key)}${a.phone ? `<small class="mono">${esc(a.phone)}</small>` : ""}</td>
             <td><span class="pill ${st.cls}">${esc(st.text)}</span></td>
             <td>${fmtNum(a.quota)}</td>
             <td>
-              ${a.createdTime ? esc(new Date(a.createdTime * 1000).toLocaleDateString("zh-CN")) : "—"}
-              ${a.registeredToday ? '<span class="pill ok">今天</span>' : ""}
-              ${a.inviteEligible && !a.registeredToday ? '<span class="pill">24h内</span>' : ""}
+              ${a.createdTime ? esc(new Date(a.createdTime * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })) : "—"}
+              ${(() => {
+                const rm = bindRemain(a.createdTime)
+                return rm.text ? `<span class="pill ${rm.cls}">${esc(rm.text)}</span>` : ""
+              })()}
+              ${a.wechatBound && a.inviteEligible ? '<span class="pill">待补邀请</span>' : ""}
             </td>
             <td class="row-actions">
               ${a.wechatBound ? '<span class="muted">—</span>' : `<button class="tiny primary bind-qr-btn" data-key="${esc(a.key)}" data-label="${esc(a.label ?? a.key)}">出码</button>`}
@@ -1366,6 +1402,20 @@ on($("bind-batch"), async () => {
 on($("bind-filter"), () => {
   if (state.bindData) renderBind(state.bindData)
 })
+
+/**
+ * 让「剩多久」自己走字。
+ *
+ * 每 30 秒用最近一次快照**本地重绘**一次 —— 不打任何上游（`renderBind` 只读 state）。
+ * 用 setTimeout 自排程而不是 setInterval：面板的既定规矩是「不许有轮询」，
+ * 这里纯粹是让倒计时走动，不碰网络。
+ */
+function bindTick() {
+  const pane = $("pane-bind")
+  if (pane && !pane.hidden && state.bindData) renderBind(state.bindData)
+  setTimeout(bindTick, 30000)
+}
+setTimeout(bindTick, 30000)
 
 /**
  * 「扫码绑定」页每行的「出码」：就地展开该号的绑定二维码 + 粘贴回调完成绑定。
