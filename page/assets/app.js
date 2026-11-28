@@ -15,12 +15,17 @@ const fmtNum = (n) => (n == null || n === "" ? "—" : Number(n).toLocaleString(
  * `/api/status` 里 `quota_per_unit = 500000`（即 500000 = $1），
  * 所以 5,000,000 其实是 **$10.00**。直接显示原始数字没人看得懂，这里换算成美元。
  */
-const QUOTA_PER_POINT = 5000
-const fmtQuota = (q) => {
-  if (q == null || q === "") return "—"
-  const n = Number(q)
+/**
+ * 积分直接用平台给的 `points_entitlement.total_points`。
+ *
+ * ⚠ 不要用 quota/5000 换算：quota 是「额度」原始单位，和积分是两套账
+ *   （实测 5,000,000 quota 的号，真实积分是 640.19，不是 1000）。
+ */
+const fmtQuota = (pts) => {
+  if (pts == null || pts === "") return "—"
+  const n = Number(pts)
   if (!Number.isFinite(n)) return "—"
-  return `${(n / QUOTA_PER_POINT).toLocaleString("zh-CN", { maximumFractionDigits: 2 })} 积分`
+  return `${n.toLocaleString("zh-CN", { maximumFractionDigits: 2 })} 积分`
 }
 const fmtTime = (sec) => {
   const n = Number(sec) || 0
@@ -721,7 +726,7 @@ function renderInvite(data) {
         "<td>" + code + "</td>" +
         "<td>" + (x.invitedCount == null ? "—" : fmtNum(x.invitedCount)) + "</td>" +
         "<td>" + (x.points == null ? "—" : fmtNum(x.points)) + "</td>" +
-        "<td title=\"" + (x.quota == null ? "" : fmtNum(x.quota) + " quota") + "\">" + fmtQuota(x.quota) + "</td>" +
+        "<td title=\"" + (x.quota == null ? "" : fmtNum(x.quota) + " quota") + "\">" + fmtQuota(x.points) + "</td>" +
         "<td>" + (x.at ? fmtAgo(x.at) : "无缓存") + "</td>" +
         '<td class="row-actions">' +
         '<button class="tiny" data-iact="read" data-key="' + esc(x.key) + '">读取</button>' +
@@ -1217,7 +1222,7 @@ function renderBind(data) {
             <td>${esc(a.label ?? a.key)}${a.phone ? `<small class="mono">${esc(a.phone)}</small>` : ""}</td>
             <td><span class="pill ${st.cls}">${esc(st.text)}</span></td>
             <td>${a.inviteBound ? '<span class="pill done">已绑</span>' : '<span class="pill warn">未绑</span>'}</td>
-            <td title="${a.quota == null ? "" : fmtNum(a.quota) + " quota"}">${fmtQuota(a.quota)}</td>
+            <td title="${a.quota == null ? "" : fmtNum(a.quota) + " quota"}">${fmtQuota(a.points)}</td>
             <td>
               ${a.createdTime ? esc(new Date(a.createdTime * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })) : "—"}
               ${(() => {

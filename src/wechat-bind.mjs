@@ -156,6 +156,8 @@ export async function fetchSelf(opts) {
     wechatId: String(d.wechat_id ?? ""),
     inviteCode: String(d.aff_code ?? ""),
     quota: Number(d.quota) || 0,
+    // 真实「积分」在 points_entitlement.total_points；quota 是额度（原始单位），两回事
+    points: Number(d?.points_entitlement?.total_points ?? d.points ?? d.amount) || 0,
     phone: String(d.phone ?? d.display_name ?? ""),
     createdTime: Number(d.created_time) || 0,
     // `inviter_id` 非 0 = 这个号已经被别人（或自己的另一个号）邀请过了，即「邀请码已绑」
@@ -284,6 +286,7 @@ export async function refreshPool(opts) {
         wechatBound: self.wechatBound,
         wechatId: self.wechatId,
         quota: self.quota,
+        points: self.points,
         createdTime: self.createdTime,
         // 邀请码是否已绑：inviter_id 非 0 即「已被邀请」
         inviterId: self.inviterId,
@@ -344,6 +347,7 @@ export function poolOverview(opts) {
       wechatBound: a.wechatBound === true,
       tokenInvalid: a.tokenInvalid === true,
       quota: Number.isFinite(a.quota) ? a.quota : null,
+      points: Number.isFinite(a.points) ? a.points : null,
       checkedAt: Number(a.checkedAt) || 0,
       createdTime: Number(a.createdTime) || 0,
       registeredToday: isToday(a.createdTime),
@@ -657,7 +661,7 @@ export function createBindPortal(opts) {
         wechatId: session.wechatId,
         // 复核时顺手把积分/注册时间落盘：否则刚绑的号在面板上一直是「积分 0」，
         // 要等下一次「刷新全部账号状态」才对上（用户会以为数字是假的）。
-        ...(after.ok ? { quota: after.quota, createdTime: after.createdTime } : {}),
+        ...(after.ok ? { quota: after.quota, points: after.points, createdTime: after.createdTime } : {}),
       })
       if (locks.get(session.key) === session.sessionId) locks.delete(session.key)
       // 绑完立刻自动补邀请码（不 await：别拖慢扫码反馈；结果进日志）
@@ -944,7 +948,7 @@ export function createBindPortal(opts) {
       const self = await fetchSelf({ platformBaseUrl, token, fetchImpl })
       if (!self.ok) return { ok: false, reason: "upstream", message: self.message ?? "读账号状态失败" }
       if (self.wechatBound) {
-        markBound(want, { wechatId: self.wechatId, ...(self.ok ? { quota: self.quota, createdTime: self.createdTime } : {}) })
+        markBound(want, { wechatId: self.wechatId, ...(self.ok ? { quota: self.quota, points: self.points, createdTime: self.createdTime } : {}) })
         return { ok: false, reason: "already-bound", message: "这个号已经绑过微信了" }
       }
 
@@ -1061,7 +1065,7 @@ export function createBindPortal(opts) {
       const self = await fetchSelf({ platformBaseUrl, token, fetchImpl })
       if (!self.ok) return { ok: false, reason: "upstream", message: self.message ?? "读账号状态失败" }
       if (self.wechatBound) {
-        markBound(want, { wechatId: self.wechatId, ...(self.ok ? { quota: self.quota, createdTime: self.createdTime } : {}) })
+        markBound(want, { wechatId: self.wechatId, ...(self.ok ? { quota: self.quota, points: self.points, createdTime: self.createdTime } : {}) })
         return {
           ok: false,
           reason: "already-bound",
@@ -1171,7 +1175,7 @@ export function createBindPortal(opts) {
           // 也当成可分配 —— 真机复现过：扫进来立刻显示「绑定成功」，对方其实什么都没做。
           const self = await fetchSelf({ platformBaseUrl, token, fetchImpl })
           if (self.ok && self.wechatBound) {
-            markBound(cur, { wechatId: self.wechatId, ...(self.ok ? { quota: self.quota, createdTime: self.createdTime } : {}) })
+            markBound(cur, { wechatId: self.wechatId, ...(self.ok ? { quota: self.quota, points: self.points, createdTime: self.createdTime } : {}) })
             key = candidates().find((k) => !tried.includes(k)) ?? ""
             continue
           }
@@ -1316,7 +1320,7 @@ export function createBindPortal(opts) {
           s.status = "bound"
           s.settledAt = now()
           if (locks.get(s.key) === s.sessionId) locks.delete(s.key)
-          markBound(s.key, { wechatId: self.wechatId, ...(self.ok ? { quota: self.quota, createdTime: self.createdTime } : {}) })
+          markBound(s.key, { wechatId: self.wechatId, ...(self.ok ? { quota: self.quota, points: self.points, createdTime: self.createdTime } : {}) })
           return { status: "bound", label }
         }
 
@@ -1371,7 +1375,7 @@ export function createBindPortal(opts) {
         s.status = "bound"
         s.settledAt = now()
         if (locks.get(s.key) === s.sessionId) locks.delete(s.key)
-        markBound(s.key, { wechatId: self.wechatId, ...(self.ok ? { quota: self.quota, createdTime: self.createdTime } : {}) })
+        markBound(s.key, { wechatId: self.wechatId, ...(self.ok ? { quota: self.quota, points: self.points, createdTime: self.createdTime } : {}) })
         return { status: "bound", label }
       }
       if (!self.ok) {
