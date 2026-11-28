@@ -158,6 +158,8 @@ export async function fetchSelf(opts) {
     quota: Number(d.quota) || 0,
     phone: String(d.phone ?? d.display_name ?? ""),
     createdTime: Number(d.created_time) || 0,
+    // `inviter_id` 非 0 = 这个号已经被别人（或自己的另一个号）邀请过了，即「邀请码已绑」
+    inviterId: Number(d.inviter_id) || 0,
   }
 }
 
@@ -283,6 +285,8 @@ export async function refreshPool(opts) {
         wechatId: self.wechatId,
         quota: self.quota,
         createdTime: self.createdTime,
+        // 邀请码是否已绑：inviter_id 非 0 即「已被邀请」
+        inviterId: self.inviterId,
         checkedAt: now(),
         tokenInvalid: false,
       }
@@ -343,6 +347,9 @@ export function poolOverview(opts) {
       checkedAt: Number(a.checkedAt) || 0,
       createdTime: Number(a.createdTime) || 0,
       registeredToday: isToday(a.createdTime),
+      // 邀请码绑定状态：inviter_id 非 0 = 已经被邀请过（和「绑微信」是两件事）
+      inviterId: Number(a.inviterId) || 0,
+      inviteBound: (Number(a.inviterId) || 0) !== 0,
       // 邀请码只认「注册 24 小时内」，所以这两个标记要分开给
       inviteEligible: isWithin24h(a.createdTime),
       error: a.error ? String(a.error) : undefined,

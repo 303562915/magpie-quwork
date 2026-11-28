@@ -15,12 +15,12 @@ const fmtNum = (n) => (n == null || n === "" ? "—" : Number(n).toLocaleString(
  * `/api/status` 里 `quota_per_unit = 500000`（即 500000 = $1），
  * 所以 5,000,000 其实是 **$10.00**。直接显示原始数字没人看得懂，这里换算成美元。
  */
-const QUOTA_PER_UNIT = 500000
+const QUOTA_PER_POINT = 5000
 const fmtQuota = (q) => {
   if (q == null || q === "") return "—"
   const n = Number(q)
   if (!Number.isFinite(n)) return "—"
-  return `$${(n / QUOTA_PER_UNIT).toFixed(2)}`
+  return `${(n / QUOTA_PER_POINT).toLocaleString("zh-CN", { maximumFractionDigits: 2 })} 积分`
 }
 const fmtTime = (sec) => {
   const n = Number(sec) || 0
@@ -1205,6 +1205,7 @@ function renderBind(data) {
           return `<tr>
             <td>${esc(a.label ?? a.key)}${a.phone ? `<small class="mono">${esc(a.phone)}</small>` : ""}</td>
             <td><span class="pill ${st.cls}">${esc(st.text)}</span></td>
+            <td>${a.inviteBound ? '<span class="pill done">已绑</span>' : '<span class="pill warn">未绑</span>'}</td>
             <td title="${a.quota == null ? "" : fmtNum(a.quota) + " quota"}">${fmtQuota(a.quota)}</td>
             <td>
               ${a.createdTime ? esc(new Date(a.createdTime * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })) : "—"}
@@ -1220,7 +1221,7 @@ function renderBind(data) {
           </tr>`
         })
         .join("")
-    : `<tr><td colspan="5"><div class="empty">` +
+    : `<tr><td colspan="6"><div class="empty">` +
       (filter === "24h"
         ? "没有「24 小时内注册」的账号。邀请码只认这个窗口；老号绑微信后只能签到，补不了邀请。<br>要把老号绑上微信做签到，把上面的筛选切到「全部未绑」。"
         : filter === "today"
@@ -1233,7 +1234,7 @@ async function loadBindPool() {
   try {
     renderBind(await api("/bind/api/pool"))
   } catch (e) {
-    $("bind-body").innerHTML = `<tr><td colspan="5"><div class="empty bad">读取失败：${esc(String(e?.message ?? e))}</div></td></tr>`
+    $("bind-body").innerHTML = `<tr><td colspan="6"><div class="empty bad">读取失败：${esc(String(e?.message ?? e))}</div></td></tr>`
   }
   // 公网地址与固定码：顺手带上（都是只读本地文件）
   try {
