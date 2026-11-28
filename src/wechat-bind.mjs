@@ -574,7 +574,12 @@ export function createBindPortal(opts) {
       pushEvent("bound", { key: session.key, label: labelOf(listPoolTokens(configDir).map((a) => a.key), session.key) })
       session.wechatId = after.ok ? after.wechatId : ""
       session.verified = Boolean(after.ok && after.wechatBound)
-      markBound(session.key, { wechatId: session.wechatId })
+      markBound(session.key, {
+        wechatId: session.wechatId,
+        // 复核时顺手把积分/注册时间落盘：否则刚绑的号在面板上一直是「积分 0」，
+        // 要等下一次「刷新全部账号状态」才对上（用户会以为数字是假的）。
+        ...(after.ok ? { quota: after.quota, createdTime: after.createdTime } : {}),
+      })
       if (locks.get(session.key) === session.sessionId) locks.delete(session.key)
       return
     }
@@ -845,7 +850,7 @@ export function createBindPortal(opts) {
       const self = await fetchSelf({ platformBaseUrl, token, fetchImpl })
       if (!self.ok) return { ok: false, reason: "upstream", message: self.message ?? "读账号状态失败" }
       if (self.wechatBound) {
-        markBound(want, { wechatId: self.wechatId })
+        markBound(want, { wechatId: self.wechatId, ...(self.ok ? { quota: self.quota, createdTime: self.createdTime } : {}) })
         return { ok: false, reason: "already-bound", message: "这个号已经绑过微信了" }
       }
 
@@ -962,7 +967,7 @@ export function createBindPortal(opts) {
       const self = await fetchSelf({ platformBaseUrl, token, fetchImpl })
       if (!self.ok) return { ok: false, reason: "upstream", message: self.message ?? "读账号状态失败" }
       if (self.wechatBound) {
-        markBound(want, { wechatId: self.wechatId })
+        markBound(want, { wechatId: self.wechatId, ...(self.ok ? { quota: self.quota, createdTime: self.createdTime } : {}) })
         return {
           ok: false,
           reason: "already-bound",
@@ -1072,7 +1077,7 @@ export function createBindPortal(opts) {
           // 也当成可分配 —— 真机复现过：扫进来立刻显示「绑定成功」，对方其实什么都没做。
           const self = await fetchSelf({ platformBaseUrl, token, fetchImpl })
           if (self.ok && self.wechatBound) {
-            markBound(cur, { wechatId: self.wechatId })
+            markBound(cur, { wechatId: self.wechatId, ...(self.ok ? { quota: self.quota, createdTime: self.createdTime } : {}) })
             key = candidates().find((k) => !tried.includes(k)) ?? ""
             continue
           }
@@ -1217,7 +1222,7 @@ export function createBindPortal(opts) {
           s.status = "bound"
           s.settledAt = now()
           if (locks.get(s.key) === s.sessionId) locks.delete(s.key)
-          markBound(s.key, { wechatId: self.wechatId })
+          markBound(s.key, { wechatId: self.wechatId, ...(self.ok ? { quota: self.quota, createdTime: self.createdTime } : {}) })
           return { status: "bound", label }
         }
 
@@ -1272,7 +1277,7 @@ export function createBindPortal(opts) {
         s.status = "bound"
         s.settledAt = now()
         if (locks.get(s.key) === s.sessionId) locks.delete(s.key)
-        markBound(s.key, { wechatId: self.wechatId })
+        markBound(s.key, { wechatId: self.wechatId, ...(self.ok ? { quota: self.quota, createdTime: self.createdTime } : {}) })
         return { status: "bound", label }
       }
       if (!self.ok) {
