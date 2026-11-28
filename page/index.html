@@ -124,7 +124,11 @@
 
         <div class="toolbar">
           <div class="toolbar-actions">
-            <button id="invite-select-all" class="tiny">全选</button>
+            <select id="invite-filter" class="field-input" style="max-width:200px">
+              <option value="eligible" selected>可激活邀请（默认）</option>
+              <option value="all">全部账号</option>
+            </select>
+            <button id="invite-select-all" class="tiny">全选可见</button>
             <button id="invite-select-none" class="tiny">全不选</button>
             <button id="invite-refresh-selected" class="primary">读取选中账号的邀请码</button>
             <span id="invite-selected-count" class="muted">已选 0</span>
@@ -161,7 +165,7 @@
           <button id="activate-run" class="primary">绑定邀请码到选中账号</button>
           <span id="activate-note" class="status" role="status"></span>
         </div>
-        <p class="hint">绑自己的码会收到「不能使用自己的邀请码」—— 平台正常回执，不是 bug。</p>
+        <p class="hint">只对「已绑微信 + 注册 24 小时内 + 没被别人邀请过」的号激活邀请码才有意义；其余会直接回执原因。逐个激活、每次间隔 1.5 秒，遇「操作过于频繁」会停。</p>
       </div>
 
       <div class="card">

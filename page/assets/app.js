@@ -619,7 +619,7 @@ on($("delete-selected"), async () => {
 // 每行 = 一个账号。读接口只读缓存（零上游）；「读取 / 绑定 / 记录」都只对**选中**账号生效，
 // 每行单独用一个账号自己的 token（后端按 `key` 找 token）。
 
-const inviteState = { accounts: [], selected: new Set(), recordsKey: "", recordsPage: 1 }
+const inviteState = { accounts: [], selected: new Set(), recordsKey: "", recordsPage: 1, elig: new Map(), view: [], filter: "eligible", at: 0 }
 
 function inviteSelectedKeys() {
   return [...inviteState.selected]
@@ -627,42 +627,67 @@ function inviteSelectedKeys() {
 
 function updateInviteSelectionUi() {
   const n = inviteState.selected.size
-  $("invite-selected-count").textContent = `已选 ${n}`
-  $("invite-check-all").checked = inviteState.accounts.length > 0 && n === inviteState.accounts.length
-  $("invite-refresh-selected").disabled = n === 0
-  $("activate-run").disabled = n === 0
-  $("records-run").disabled = n === 0 && !inviteState.recordsKey
+  const visible = inviteState.view.map((x) => x.key)
+  const picked = visible.filter((k) => inviteState.selected.has(k)).length
+  $("invite-selected-count").textContent = "已选 " + n + " / 可见 " + visible.length
+  $("invite-check-all").checked = visible.length > 0 && picked === visible.length
+  const runEl = $("activate-run")
+  if (runEl) runEl.disabled = n === 0
+  const recEl = $("records-run")
+  if (recEl) recEl.disabled = n === 0 && !inviteState.recordsKey
 }
 
 function renderInvite(data) {
-  const list = data?.accounts ?? []
-  inviteState.accounts = list
-  $("invite-cache-note").textContent = data?.at ? `缓存：${fmtAgo(data.at)}` : "还没有缓存"
+  const all = data?.accounts ?? []
+  inviteState.accounts = all
+  if (data?.at) inviteState.at = data.at
+  $("invite-cache-note").textContent = inviteState.at ? "缓存：" + fmtAgo(inviteState.at) : "还没有缓存"
+
+  const filter = $("invite-filter")?.value || inviteState.filter
+  inviteState.filter = filter
+
+  /** 这个号还能不能吃邀请码：要有池子快照才判断得了。 */
+  const verdict = (k) => {
+    const e2 = inviteState.elig.get(k)
+    if (!e2) return { ok: false, why: "未同步" }
+    if (!e2.wechatBound) return { ok: false, why: "未绑微信" }
+    if (!e2.inviteEligible) return { ok: false, why: "超 24 小时" }
+    return { ok: true, why: "可激活" }
+  }
+
+  const view = all.filter((x) => (filter === "all" ? true : verdict(x.key).ok))
+  inviteState.view = view
 
   const body = $("invite-body")
-  if (list.length === 0) {
-    body.innerHTML = '<tr><td colspan="8"><div class="empty">还没有 quwork 账号</div></td></tr>'
+  if (view.length === 0) {
+    body.innerHTML =
+      '<tr><td colspan="8"><div class="empty">' +
+      (filter === "eligible"
+        ? "现在没有「可激活邀请」的号（要已绑微信 + 注册 24 小时内）；切到「全部账号」看其它号"
+        : "还没有 quwork 账号") +
+      "</div></td></tr>"
     updateInviteSelectionUi()
     return
   }
 
-  body.innerHTML = list
-    .map((a) => {
-      const checked = inviteState.selected.has(a.key) ? "checked" : ""
-      const code = a.inviteCode ? `<code class="invite-code-big">${esc(a.inviteCode)}</code>` : "—"
-      return `<tr data-key="${esc(a.key)}"${inviteState.recordsKey === a.key ? ' class="is-current"' : ""}>
-        <td class="col-check"><input type="checkbox" class="invite-check" data-key="${esc(a.key)}" ${checked} aria-label="选择 ${esc(a.accountId)}"></td>
-        <td>${esc(a.accountId || "—")}<small class="mono">${esc(a.key)}</small></td>
-        <td>${code}</td>
-        <td>${a.invitedCount == null ? "—" : fmtNum(a.invitedCount)}</td>
-        <td>${a.points == null ? "—" : fmtNum(a.points)}</td>
-        <td>${a.quota == null ? "—" : fmtNum(a.quota)}</td>
-        <td>${a.at ? fmtAgo(a.at) : "无缓存"}</td>
-        <td class="row-actions">
-          <button class="tiny" data-iact="read" data-key="${esc(a.key)}">读取</button>
-          <button class="tiny" data-iact="copy" data-key="${esc(a.key)}">复制</button>
-        </td>
-      </tr>`
+  body.innerHTML = view
+    .map((x) => {
+      const checked = inviteState.selected.has(x.key) ? "checked" : ""
+      const code = x.inviteCode ? '<code class="invite-code-big">' + esc(x.inviteCode) + "</code>" : "—"
+      const v = verdict(x.key)
+      const badge = v.ok ? '<span class="pill ok">可激活</span>' : '<span class="pill">' + esc(v.why) + "</span>"
+      return '<tr data-key="' + esc(x.key) + '"' + (inviteState.recordsKey === x.key ? ' class="is-current"' : "") + ">" +
+        '<td class="col-check"><input type="checkbox" class="invite-check" data-key="' + esc(x.key) + '" ' + checked + ' aria-label="选择 ' + esc(x.accountId) + '"></td>' +
+        "<td>" + esc(x.accountId || "—") + badge + '<small class="mono">' + esc(x.key) + "</small></td>" +
+        "<td>" + code + "</td>" +
+        "<td>" + (x.invitedCount == null ? "—" : fmtNum(x.invitedCount)) + "</td>" +
+        "<td>" + (x.points == null ? "—" : fmtNum(x.points)) + "</td>" +
+        "<td>" + (x.quota == null ? "—" : fmtNum(x.quota)) + "</td>" +
+        "<td>" + (x.at ? fmtAgo(x.at) : "无缓存") + "</td>" +
+        '<td class="row-actions">' +
+        '<button class="tiny" data-iact="read" data-key="' + esc(x.key) + '">读取</button>' +
+        '<button class="tiny" data-iact="copy" data-key="' + esc(x.key) + '">复制</button>' +
+        "</td></tr>"
     })
     .join("")
 
@@ -670,10 +695,25 @@ function renderInvite(data) {
 }
 
 async function loadInvite() {
-  const data = await api("/api/invite/summary")
+  // 邀请汇总 + 绑定池快照（后者才有 wechatBound / createdTime，用来判断能不能激活）
+  const [data, pool] = await Promise.all([
+    api("/api/invite/summary"),
+    api("/bind/api/pool").catch(() => null),
+  ])
+  inviteState.elig = new Map(
+    (Array.isArray(pool?.accounts) ? pool.accounts : []).map((x) => [
+      x.key,
+      { wechatBound: x.wechatBound === true, inviteEligible: x.inviteEligible === true },
+    ]),
+  )
   renderInvite(data)
   return data
 }
+
+on($("invite-filter"), () => {
+  inviteState.filter = $("invite-filter").value
+  renderInvite({ accounts: inviteState.accounts, at: inviteState.at })
+})
 
 $("invite-body")?.addEventListener("change", (e) => {
   const el = e.target
@@ -719,8 +759,9 @@ $("invite-check-all")?.addEventListener("change", (e) => {
 })
 
 on($("invite-select-all"), () => {
-  for (const a of inviteState.accounts) inviteState.selected.add(a.key)
-  renderInvite({ accounts: inviteState.accounts, at: 0 })
+  // 只选**当前可见**的行（默认筛选是「可激活」，别一不小心把全部号都排上）
+  for (const x of inviteState.view) inviteState.selected.add(x.key)
+  renderInvite({ accounts: inviteState.accounts, at: inviteState.at })
 })
 on($("invite-select-none"), () => {
   inviteState.selected.clear()
@@ -753,27 +794,48 @@ on($("activate-run"), async () => {
   const note = $("activate-note")
   const inviteCode = $("activate-code").value.trim()
 
-  if (keys.length === 0) {
-    note.textContent = "先选中要绑定的账号"
-    note.className = "status bad"
-    return
-  }
-  if (!inviteCode) {
-    note.textContent = "请输入邀请码"
-    note.className = "status bad"
-    return
+  if (keys.length === 0) { note.textContent = "先选中要绑定的账号"; note.className = "status bad"; return }
+  if (!inviteCode) { note.textContent = "请输入邀请码"; note.className = "status bad"; return }
+
+  /**
+   * 逐个激活，每次间隔 1.5 秒；连续 2 次触发「操作过于频繁」就停手。
+   * 平台对 /api/user/activate 限流，一次全绑只会刷出一屏 429。
+   */
+  const btn = $("activate-run")
+  const label = btn.textContent
+  btn.disabled = true
+  const results = []
+  let freq = 0
+  let okCount = 0
+  try {
+    for (const [i, key] of keys.entries()) {
+      btn.textContent = "激活中 " + (i + 1) + "/" + keys.length + "…"
+      const who = inviteState.accounts.find((x) => x.key === key)?.accountId ?? key
+      let d = {}
+      try {
+        d = await api("/api/invite/activate", { key, inviteCode })
+      } catch (err) {
+        d = { ok: false, message: String(err?.message ?? "请求失败") }
+      }
+      const msg = String(d.message || (d.ok ? "绑定成功" : "绑定失败"))
+      if (d.ok) okCount += 1
+      results.push(who + ": " + msg)
+      note.textContent = results.slice(-3).join(" · ")
+      note.className = "status " + (d.ok ? "ok" : "bad")
+
+      freq = /频繁/.test(msg) ? freq + 1 : 0
+      if (freq >= 2) { results.push("（连续频率限制，已停，剩下稍后再试）"); break }
+      if (i < keys.length - 1) await new Promise((r) => setTimeout(r, 1500))
+    }
+  } finally {
+    btn.disabled = false
+    btn.textContent = label
   }
 
-  // 一次只绑一个账号（平台语义就是「这个号绑那个码」），多选时逐个来并汇总
-  const results = []
-  for (const key of keys) {
-    const d = await api("/api/invite/activate", { key, inviteCode })
-    const who = inviteState.accounts.find((a) => a.key === key)?.accountId ?? key
-    results.push(`${who}: ${d.message || (d.ok ? "绑定成功" : "绑定失败")}`)
-  }
   note.textContent = results.join(" · ")
-  note.className = `status ${results.every((r) => r.includes("成功")) ? "ok" : "bad"}`
-  toast(results.join(" · "), !results.every((r) => r.includes("成功")))
+  note.className = "status " + (okCount === keys.length ? "ok" : "bad")
+  toast("成功 " + okCount + "/" + keys.length, okCount !== keys.length)
+  await loadInvite()
 })
 
 // ── 邀请记录（选中账号后显示）──────────────────────────────────────────
