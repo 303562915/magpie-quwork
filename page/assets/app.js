@@ -674,16 +674,27 @@ function renderInvite(data) {
   const filter = $("invite-filter")?.value || inviteState.filter
   inviteState.filter = filter
 
-  /** 这个号还能不能吃邀请码：要有池子快照才判断得了。 */
+  /**
+   * 这个号还能不能吃邀请码。
+   *
+   * `unknown: true` 表示**信息不足**（池子快照里没有它，或者没有注册时间）。
+   * 这种情况必须**照样显示出来**，否则「刚加进池子的新号」会被默认筛选静默藏掉，
+   * 用户会以为页面上没有这个号（真机反馈过）。
+   */
   const verdict = (k) => {
     const e2 = inviteState.elig.get(k)
-    if (!e2) return { ok: false, why: "未同步" }
+    if (!e2) return { ok: false, unknown: true, why: "未同步" }
     if (!e2.wechatBound) return { ok: false, why: "未绑微信" }
+    if (e2.createdTime === 0) return { ok: false, unknown: true, why: "未同步" }
     if (!e2.inviteEligible) return { ok: false, why: "超 24 小时" }
     return { ok: true, why: "可激活" }
   }
 
-  const view = all.filter((x) => (filter === "all" ? true : verdict(x.key).ok))
+  const view = all.filter((x) => {
+    if (filter === "all") return true
+    const v = verdict(x.key)
+    return v.ok || v.unknown
+  })
   inviteState.view = view
 
   const body = $("invite-body")
@@ -703,7 +714,7 @@ function renderInvite(data) {
       const checked = inviteState.selected.has(x.key) ? "checked" : ""
       const code = x.inviteCode ? '<code class="invite-code-big">' + esc(x.inviteCode) + "</code>" : "—"
       const v = verdict(x.key)
-      const badge = v.ok ? '<span class="pill ok">可激活</span>' : '<span class="pill">' + esc(v.why) + "</span>"
+      const badge = v.ok ? '<span class="pill ok">可激活</span>' : '<span class="pill' + (v.unknown ? "" : " warn") + '">' + esc(v.why) + "</span>"
       return '<tr data-key="' + esc(x.key) + '"' + (inviteState.recordsKey === x.key ? ' class="is-current"' : "") + ">" +
         '<td class="col-check"><input type="checkbox" class="invite-check" data-key="' + esc(x.key) + '" ' + checked + ' aria-label="选择 ' + esc(x.accountId) + '"></td>' +
         "<td>" + esc(x.accountId || "—") + badge + '<small class="mono">' + esc(x.key) + "</small></td>" +
@@ -731,7 +742,7 @@ async function loadInvite() {
   inviteState.elig = new Map(
     (Array.isArray(pool?.accounts) ? pool.accounts : []).map((x) => [
       x.key,
-      { wechatBound: x.wechatBound === true, inviteEligible: x.inviteEligible === true },
+      { wechatBound: x.wechatBound === true, inviteEligible: x.inviteEligible === true, createdTime: Number(x.createdTime) || 0 },
     ]),
   )
   renderInvite(data)
