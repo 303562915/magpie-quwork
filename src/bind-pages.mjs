@@ -130,7 +130,7 @@ footer { color: #9ca3af; font-size: 12px; }
 .card.wide { max-width: 980px; }
 .grid {
   display: grid; gap: 12px; margin: 14px 0;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
 }
 .cell {
   border: 1px solid #e5e7eb; border-radius: 14px; padding: 10px;
@@ -139,7 +139,7 @@ footer { color: #9ca3af; font-size: 12px; }
 }
 .cell-head { display: flex; width: 100%; justify-content: space-between; align-items: center; gap: 6px; }
 .cell-head .timer { font-size: 13px; color: #6b7280; }
-.qr-sm { width: 100%; max-width: 130px; height: auto; image-rendering: pixelated; border-radius: 6px; }
+.qr-sm { width: 100%; max-width: 240px; height: auto; image-rendering: auto; border-radius: 8px; background: #fff; padding: 4px; }
 .cell-note { margin: 0; font-size: 12px; color: #4b5563; text-align: center; }
 .cell-link {
   display: block; width: 100%; text-align: center; font-size: 12px; padding: 5px 6px;
