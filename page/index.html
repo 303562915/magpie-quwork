@@ -293,11 +293,10 @@
               <option value="all">全部未绑</option>
             </select>
             <button id="bind-batch" class="primary">批量出码（选中项）</button>
+            <button id="bind-download">打包下载全部真码</button>
             <button id="bind-sync">刷新全部账号状态</button>
             <button id="bind-release" class="danger">清掉空闲占用</button>
             <button id="bind-release-all" class="danger">全部强制清掉</button>
-            <a id="bind-open" class="muted" href="#" target="_blank" rel="noreferrer">打开门户页</a>
-            <a id="bind-wall" class="muted" href="#" target="_blank" rel="noreferrer">阵列页（群发）</a>
           </div>
           <div class="toolbar-actions">
             <span id="bind-summary" class="muted" role="status">—</span>
@@ -318,28 +317,7 @@
           </table>
         </div>
 
-        <div class="toolbar" style="margin-top:14px">
-          <label class="field" style="flex:1 1 260px">阵列页 / 出码页用的公网地址
-            <input id="bind-public" class="field-input" placeholder="https://xxx.trycloudflare.com（留空 = 用当前面板地址）">
-          </label>
-          <button id="bind-save-public" class="primary">保存并刷新</button>
-          <span id="bind-public-note" class="status" role="status"></span>
-        </div>
-
-        <div class="toolbar" style="margin-top:10px">
-          <div style="flex:1 1 320px">
-            <p class="hint">公网链接（发这个就行，不用二维码）：
-              <a id="bind-url-public" class="mono" href="#" target="_blank" rel="noreferrer">—</a>
-            </p>
-            <p class="hint">本地链接（同一台机器上用）：
-              <a id="bind-url-local" class="mono" href="#" target="_blank" rel="noreferrer">—</a>
-            </p>
-          </div>
-          <div class="toolbar-actions">
-            <button id="bind-copy-public">复制公网链接</button>
-            <button id="bind-copy-local">复制本地链接</button>
-          </div>
-        </div>
+        <p class="hint">出码后点卡片上的「看大图」可另存图片直接发微信；点「打包下载全部真码」可一次保存成一张长图。</p>
       </div>
     </section>
   </div>

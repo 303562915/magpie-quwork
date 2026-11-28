@@ -1112,11 +1112,11 @@ async function loadBindPool() {
   // 公网地址与固定码：顺手带上（都是只读本地文件）
   try {
     const s = await api("/api/settings")
-    $("bind-public").value = String(s?.settings?.bindPublicUrl ?? "")
+    
   } catch {
     /* 设置读不到不影响看池子 */
   }
-  void refreshBindQr()
+  
 }
 
 /**
@@ -1125,32 +1125,6 @@ async function loadBindPool() {
  * 为什么要读响应头：固定码的内容由「环境变量 / 面板设置 / 请求头」三级决定，
  * 页面上猜不出来；只有服务端自己知道最终拼成了什么。
  */
-async function refreshBindQr() {
-  // 公网地址是随机隧道，重启就变 —— 所以这里**只给链接**，不画二维码
-  const bust = BASE + "/bind/qr.png?scale=8&t=" + Date.now()
-  let target = ""
-  try {
-    const head = await fetch(bust, { method: "HEAD" })
-    target = String(head.headers.get("x-qr-target") || "").trim()
-  } catch {}
-
-  const publicUrl = target || BASE + "/bind/go"
-  const localUrl = BASE + "/bind/go"
-
-  const aPub = $("bind-url-public")
-  if (aPub) {
-    aPub.textContent = publicUrl
-    aPub.href = publicUrl
-  }
-  const aLoc = $("bind-url-local")
-  if (aLoc) {
-    aLoc.textContent = localUrl
-    aLoc.href = localUrl
-  }
-  state.bindPublicUrl = publicUrl
-  state.bindLocalUrl = localUrl
-}
-
 on($("bind-refresh"), loadBindPool)
 
 // 只换筛选条件时不必再打上游：用最近一次数据重绘即可
@@ -1160,6 +1134,68 @@ on($("bind-refresh"), loadBindPool)
  * 与单号「出码」走的是同一个 `prepareScan` —— 出的是 confirm?uuid= 的真码，
  * 后台自动监听扫码并完成绑定。区别只是这里一次出多张，方便截图/复制链接发出去。
  */
+/**
+ * 把当前这批真码画成一张竖版长图并下载。
+ *
+ * 为什么是长图：发微信时一张图最省事 —— 对方存相册后用微信「扫一扫 → 相册」
+ * 选这张图，或者放大后让另一台设备扫。逐个截图太麻烦。
+ */
+async function downloadAllCodes() {
+  const cards = Array.isArray(state.batchCards) ? state.batchCards : []
+  if (cards.length === 0) {
+    toast("先点「批量出码」，再打包下载", true)
+    return
+  }
+  const W = 520
+  const PAD = 24
+  const IMG = 420
+  const GAP = 18
+  const LABEL = 34
+  const H = PAD * 2 + cards.length * (LABEL + IMG + GAP)
+  const cv = document.createElement("canvas")
+  cv.width = W
+  cv.height = H
+  const ctx = cv.getContext("2d")
+  ctx.fillStyle = "#ffffff"
+  ctx.fillRect(0, 0, W, H)
+  ctx.textAlign = "center"
+  let y = PAD
+  const load = (src) =>
+    new Promise((resolve) => {
+      const im = new Image()
+      im.onload = () => resolve(im)
+      im.onerror = () => resolve(null)
+      im.src = src
+    })
+  for (const c of cards) {
+    ctx.fillStyle = "#111827"
+    ctx.font = "bold 24px -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif"
+    ctx.fillText(String(c.label || ""), W / 2, y + 24)
+    y += LABEL
+    const im = c.qr ? await load(c.qr) : null
+    if (im) {
+      const x = (W - IMG) / 2
+      ctx.drawImage(im, x, y, IMG, IMG)
+    } else {
+      ctx.fillStyle = "#ef4444"
+      ctx.font = "16px sans-serif"
+      ctx.fillText("图片加载失败", W / 2, y + IMG / 2)
+    }
+    y += IMG + GAP
+  }
+  const url = cv.toDataURL("image/png")
+  const a2 = document.createElement("a")
+  a2.href = url
+  a2.download = "真码_" + cards.length + "个_" + Date.now() + ".png"
+  document.body.appendChild(a2)
+  a2.click()
+  a2.remove()
+  toast("已下载：" + cards.length + " 张码合成一张长图")
+}
+
+on($("bind-download"), () => {
+  void downloadAllCodes()
+})
 on($("bind-batch"), async () => {
   const btn = $("bind-batch")
   const box = $("bind-batch-codes")
@@ -1198,6 +1234,7 @@ on($("bind-batch"), async () => {
       return
     }
 
+    state.batchCards = Array.isArray(d.cards) ? d.cards : []
     box.hidden = false
     box.innerHTML = (d.cards ?? [])
       .map(
@@ -1278,15 +1315,6 @@ $("bind-body")?.addEventListener("click", (e) => {
   return showQrRow(btn, btn.dataset.key)
 })
 
-on($("bind-save-public"), async () => {
-  const v = String($("bind-public").value ?? "").trim()
-  const d = await api("/api/settings", { bindPublicUrl: v })
-  const saved = String(d?.settings?.bindPublicUrl ?? "")
-  $("bind-public").value = saved
-  $("bind-public-note").textContent = saved ? "已保存，链接已刷新" : "已清空（改用当前面板地址）"
-  await refreshBindQr()
-  toast(saved ? `固定码已指向 ${saved}` : "已清空公网地址")
-})
 
 on($("bind-sync"), async () => {
   $("bind-note").textContent = "正在逐个读取账号状态…"
@@ -1309,31 +1337,9 @@ on($("bind-release"), async () => {
   toast(`已释放 ${d.releasedLocks ?? 0} 个占位`)
 })
 
-;(function initBindStatic() {
-  const open = $("bind-open")
-  if (open) open.href = BASE + "/bind"
-  const wall = $("bind-wall")
-  if (wall) wall.href = BASE + "/bind/wall"
-  void refreshBindQr()
-})()
+
 
 // 复制链接（公网 / 本地）
-on($("bind-copy-public"), async () => {
-  try {
-    await navigator.clipboard.writeText(String(state.bindPublicUrl ?? ""))
-    toast("公网链接已复制")
-  } catch {
-    toast("复制失败，请手动选中链接", true)
-  }
-})
-on($("bind-copy-local"), async () => {
-  try {
-    await navigator.clipboard.writeText(String(state.bindLocalUrl ?? ""))
-    toast("本地链接已复制")
-  } catch {
-    toast("复制失败，请手动选中链接", true)
-  }
-})
 
 // ── 顶栏 ───────────────────────────────────────────────────────────────
 on($("bind-release-all"), async () => {

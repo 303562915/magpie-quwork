@@ -506,7 +506,8 @@ test("§16 面板 page 里有绑定 tab 与固定码预览，app.js 里有对应
   const root = new URL("../", import.meta.url)
   const html = readFileSync(new URL("page/index.html", root), "utf8")
   // bind-qr（二维码预览）已按用户要求换成「公网/本地链接」区
-  for (const id of ["tab-bind", "pane-bind", "bind-body", "bind-sync", "bind-summary", "bind-filter", "bind-url-public", "bind-url-local"]) {
+  // 公网链接区/门户页/阵列页入口已按用户要求删除，只留面板出码
+  for (const id of ["tab-bind", "pane-bind", "bind-body", "bind-sync", "bind-summary", "bind-filter", "bind-batch", "bind-batch-codes"]) {
     assert.ok(html.includes(`id="${id}"`), `面板 HTML 缺 ${id}`)
   }
 
@@ -514,8 +515,8 @@ test("§16 面板 page 里有绑定 tab 与固定码预览，app.js 里有对应
   assert.ok(js.includes('"bind"]'), "TABS 里要有 bind")
   assert.ok(js.includes("loadBindPool"), "要有 loadBindPool")
   assert.ok(js.includes("/bind/api/pool"), "池子状态要读 /bind/api/pool")
-  assert.ok(js.includes("state.bindPublicUrl"), "要显示公网链接")
-  assert.ok(js.includes("state.bindLocalUrl"), "要显示本地链接")
+  assert.ok(js.includes("/bind/api/qr-batch"), "批量出码要走 qr-batch")
+  assert.ok(!js.includes("state.bindPublicUrl"), "公网链接区已删除")
 })
 
 // ── ⑮ 快照是空的也不会把「早已绑过」的号发出去 ────────────────────────────
