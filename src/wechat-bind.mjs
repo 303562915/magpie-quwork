@@ -363,7 +363,7 @@ export function poolOverview(opts) {
   // 「还能赶上 24h 窗口」的号 = 24h 内注册且还没绑微信（绑完就能补邀请）
   const inviteEligible = list.filter((a) => a.inviteEligible && !a.wechatBound).length
   // 「现在就该去补邀请」的号 = 24h 内注册且已经绑了微信（平台要求先绑微信）
-  const readyToInvite = list.filter((a) => a.inviteEligible && a.wechatBound).length
+  const readyToInvite = list.filter((a) => a.inviteEligible && a.wechatBound && !a.inviteBound).length
 
   return {
     ok: true,

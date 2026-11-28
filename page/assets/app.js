@@ -1213,7 +1213,7 @@ function renderBind(data) {
                 const rm = bindRemain(a.createdTime)
                 return rm.text ? `<span class="pill ${rm.cls}">${esc(rm.text)}</span>` : ""
               })()}
-              ${a.wechatBound && a.inviteEligible ? '<span class="pill">待补邀请</span>' : ""}
+              ${a.wechatBound && a.inviteEligible && !a.inviteBound ? '<span class="pill">待补邀请</span>' : ""}
             </td>
             <td class="row-actions">
               ${a.wechatBound ? '<span class="muted">—</span>' : `<button class="tiny primary bind-qr-btn" data-key="${esc(a.key)}" data-label="${esc(a.label ?? a.key)}">出码</button>`}
