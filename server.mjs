@@ -48,6 +48,10 @@ const PAGE_DIR = join(HERE, "page")
  */
 export const DEFAULT_SETTINGS = Object.freeze({
   port: 4392,
+  /** 绑完微信后自动补邀请码（开关）。 */
+  autoInviteEnabled: false,
+  /** 自动补邀请用的邀请码池（可多个，按顺序轮换）。 */
+  autoInviteCodes: [],
   autoRefresh: false,
   accountsConcurrency: 2,
   recordsPages: 3,
@@ -320,6 +324,11 @@ export function createPageServer(opts = {}) {
     fetchImpl,
     now,
     adminToken: String(opts.bindAdminToken ?? globalThis.process?.env?.QUWORK_BIND_ADMIN_TOKEN ?? "").trim(),
+    // 自动补邀请：每次现读设置，面板里改完立刻生效（不用重启 magpie）
+    autoInvite: () => {
+      const st = effectiveSettings(configDir, opts)
+      return { enabled: st.autoInviteEnabled === true, codes: Array.isArray(st.autoInviteCodes) ? st.autoInviteCodes : [] }
+    },
   })
 
   /**
@@ -812,6 +821,11 @@ export function createPageServer(opts = {}) {
       }
       // 公网地址要清洗：空 = 用请求头；非 http(s) 一律当没填（别让固定码里出现奇怪的东西）
       next.bindPublicUrl = normalizePublicUrl(next.bindPublicUrl)
+      next.autoInviteCodes = (Array.isArray(next.autoInviteCodes) ? next.autoInviteCodes : [])
+        .map((x) => String(x ?? "").trim())
+        .filter((x) => /^[A-Za-z0-9_-]{1,32}$/.test(x))
+        .filter((x, i, arr) => arr.indexOf(x) === i)
+      next.autoInviteEnabled = next.autoInviteEnabled === true
       writeJsonFile(settingsFile(), next)
       return { ok: true, settings: next, path: settingsFile() }
     },
@@ -1331,6 +1345,39 @@ export function createPageServer(opts = {}) {
 
         // 当前占位（只给数字，不含账号信息）
         // 排查：当前会话 + 最近扫码事件（出码/已扫码/已确认/绑定/失败）
+        // 自动补邀请：读设置 + 日志
+        if (isGet && rest === "/api/auto-invite") {
+          if (!bindPortal.authorize(req)) return sendAdminJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" }, req, { head: isHead })
+          const st = effectiveSettings(configDir, opts)
+          return sendAdminJson(res, 200, {
+            ok: true,
+            enabled: st.autoInviteEnabled === true,
+            codes: Array.isArray(st.autoInviteCodes) ? st.autoInviteCodes : [],
+            ...bindPortal.autoInvite(),
+          }, req, { head: isHead })
+        }
+
+        // 自动补邀请：保存开关 + 邀请码池
+        if (isPost && rest === "/api/auto-invite") {
+          if (!bindPortal.authorize(req)) return sendAdminJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" }, req, { head: isHead })
+          const body = parsed === undefined ? await readJsonBody(req) : parsed
+          const r = await api.settingsSave({
+            autoInviteEnabled: body?.enabled === true,
+            autoInviteCodes: Array.isArray(body?.codes) ? body.codes : [],
+          })
+          return sendAdminJson(res, 200, { ok: true, settings: r.settings, ...bindPortal.autoInvite() }, req, { head: isHead })
+        }
+
+        // 自动补邀请：手动给某个号补一次
+        if (isPost && rest === "/api/auto-invite/run") {
+          if (!bindPortal.authorize(req)) return sendAdminJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" }, req, { head: isHead })
+          const body = parsed === undefined ? await readJsonBody(req) : parsed
+          const key = String(body?.key ?? "").trim()
+          if (!key) return sendAdminJson(res, 200, { ok: false, error: "没有指定账号" }, req, { head: isHead })
+          const r = await bindPortal.autoInviteRun(key)
+          return sendAdminJson(res, 200, { ok: r.ok, message: r.message, log: bindPortal.autoInvite().log }, req, { head: isHead })
+        }
+
         if (isGet && rest === "/api/sessions") {
           if (!bindPortal.authorize(req)) return sendAdminJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" }, req, { head: isHead })
           return sendAdminJson(res, 200, { ok: true, ...bindPortal.sessionsSnapshot() }, req, { head: isHead })

@@ -28,12 +28,12 @@
 //	<configDir>/quwork-bind-pool.json   账号池快照（wechatBound / quota / 检查时间）
 //	session 只放内存：重启即失效，扫码的人重新扫一次即可 —— 不需要持久化。
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { randomUUID } from "node:crypto"
 
 import { PLATFORM_BASE_URL, PLATFORM_TIMEOUT_MS } from "./constants.mjs"
-import { callPlatform } from "./invite.mjs"
+import { activateInvite, callPlatform } from "./invite.mjs"
 import { readAll } from "./auth-store.mjs"
 import { qrPng } from "./qr.mjs"
 import { confirmUrlOf, fetchQrImage, openAuthorizePage, readScanOnce } from "./wechat-watch.mjs"
@@ -424,6 +424,78 @@ export function createBindPortal(opts) {
    * 还是扫了没确认（scanned），还是确认了但换 token / 绑定失败（confirmed + fail）。
    */
   const bindEvents = []
+  /**
+   * 自动补邀请：**微信绑定成功之后**，按设置里的邀请码轮换去激活。
+   *
+   * 为什么放在绑定成功之后：平台要求先绑微信才认邀请码（否则回「请先绑定微信」），
+   * 而且邀请码只在注册 24 小时内有效 —— 这两件事天然是「绑完立刻做」。
+   *
+   * 设置从面板来（`opts.autoInvite()`），邀请码可以有多个，按顺序轮换使用。
+   * 每次尝试都写一条日志（成功/失败 + 平台原始文案），面板上能直接看到。
+   */
+  const autoInviteLog = []
+  const autoInviteLogFile = () => join(configDir, "quwork-auto-invite.jsonl")
+  let autoInviteTurn = 0
+
+  const autoInviteSettings = () => {
+    const cfg = typeof opts?.autoInvite === "function" ? opts.autoInvite() : null
+    const enabled = cfg?.enabled === true
+    const codes = (Array.isArray(cfg?.codes) ? cfg.codes : [])
+      .map((x) => String(x ?? "").trim())
+      .filter(Boolean)
+    return { enabled, codes }
+  }
+
+  const pushAutoInviteLog = (entry) => {
+    autoInviteLog.push(entry)
+    while (autoInviteLog.length > 200) autoInviteLog.shift()
+    try {
+      const f = autoInviteLogFile()
+      mkdirSync(dirname(f), { recursive: true })
+      appendFileSync(f, JSON.stringify(entry) + "\n", "utf8")
+    } catch {
+      /* 日志写不进去不影响绑定 */
+    }
+  }
+
+  /** 绑完微信后自动补邀请码。失败只记日志，不抛。 */
+  const runAutoInvite = async (key, token) => {
+    const { enabled, codes } = autoInviteSettings()
+    if (!enabled || codes.length === 0) return { ok: false, skipped: true }
+    const label = labelOf(listPoolTokens(configDir).map((a) => a.key), key)
+    const phone = listPoolTokens(configDir).find((a) => a.key === key)?.phone ?? ""
+    const inviteCode = codes[autoInviteTurn % codes.length]
+    autoInviteTurn += 1
+
+    let res
+    try {
+      res = await activateInvite({ platformBaseUrl, token, inviteCode, fetchImpl })
+    } catch (e) {
+      res = { ok: false, message: String(e?.message ?? e) }
+    }
+    const message = String(res?.message ?? (res?.ok ? "绑定成功" : "绑定失败"))
+
+    // 成功后回读一次，把 inviterId / quota 落盘（否则面板还显示未绑）
+    if (res?.ok) {
+      try {
+        const self = await fetchSelf({ platformBaseUrl, token, fetchImpl })
+        if (self.ok) {
+          markBound(key, { wechatId: self.wechatId, quota: self.quota, createdTime: self.createdTime })
+          const pool = readPool(configDir)
+          if (pool.accounts[key]) {
+            pool.accounts[key] = { ...pool.accounts[key], inviterId: self.inviterId, quota: self.quota }
+            writePool(configDir, pool)
+          }
+        }
+      } catch {
+        /* 回读失败不影响结论 */
+      }
+    }
+
+    pushAutoInviteLog({ at: now(), key, label, phone, inviteCode, ok: res?.ok === true, message })
+    return { ok: res?.ok === true, message }
+  }
+
   const pushEvent = (type, data = {}) => {
   bindEvents.push({ at: now(), type, ...data })
   while (bindEvents.length > 100) bindEvents.shift()
@@ -588,6 +660,8 @@ export function createBindPortal(opts) {
         ...(after.ok ? { quota: after.quota, createdTime: after.createdTime } : {}),
       })
       if (locks.get(session.key) === session.sessionId) locks.delete(session.key)
+      // 绑完立刻自动补邀请码（不 await：别拖慢扫码反馈；结果进日志）
+      void runAutoInvite(session.key, token)
       return
     }
 
@@ -700,6 +774,19 @@ export function createBindPortal(opts) {
       const releasedReserved = reserved.size
       reserved.clear()
       return { ok: true, releasedSessions, releasedLocks, releasedReserved, keptActive, overview: poolOverview({ configDir }) }
+    },
+
+    /** 自动补邀请：当前设置 + 最近日志（新的在前）。 */
+    autoInvite() {
+      const cfg = autoInviteSettings()
+      return { enabled: cfg.enabled, codes: cfg.codes, log: [...autoInviteLog].reverse() }
+    },
+
+    /** 手动给某个号补一次邀请码（面板「立即补」用）。 */
+    async autoInviteRun(key) {
+      const token = String(listPoolTokens(configDir).find((a) => a.key === key)?.token ?? "").trim()
+      if (!token) return { ok: false, message: "这个号没有平台 token" }
+      return runAutoInvite(key, token)
     },
 
   /** 排查用：当前所有会话 + 最近扫码事件（回答「监测到了什么、卡在哪一步」）。 */

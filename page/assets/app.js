@@ -1244,6 +1244,7 @@ function renderBind(data) {
 async function loadBindPool() {
   try {
     renderBind(await api("/bind/api/pool"))
+    void loadAutoInvite()
   } catch (e) {
     $("bind-body").innerHTML = `<tr><td colspan="6"><div class="empty bad">读取失败：${esc(String(e?.message ?? e))}</div></td></tr>`
   }
@@ -1263,6 +1264,74 @@ async function loadBindPool() {
  * 为什么要读响应头：固定码的内容由「环境变量 / 面板设置 / 请求头」三级决定，
  * 页面上猜不出来；只有服务端自己知道最终拼成了什么。
  */
+
+// ── 绑完微信自动补邀请码 ────────────────────────────────────────────────
+
+/** 渲染日志表（新的在前）。 */
+function renderAutoInvite(d) {
+  if (!d) return
+  const on = $("auto-invite-enabled")
+  if (on) on.checked = d.enabled === true
+  const box = $("auto-invite-codes")
+  if (box) box.value = (Array.isArray(d.codes) ? d.codes : []).join(", ")
+  const body = $("auto-invite-log")
+  if (!body) return
+  const log = Array.isArray(d.log) ? d.log : []
+  if (log.length === 0) {
+    body.innerHTML = '<tr><td colspan="4"><div class="empty">还没有记录</div></td></tr>'
+    return
+  }
+  body.innerHTML = log
+    .slice(0, 50)
+    .map((e) => {
+      const t = e.at ? new Date(e.at).toLocaleString("zh-CN", { hour12: false }) : "—"
+      const pill = e.ok ? '<span class="pill ok">成功</span>' : '<span class="pill fail">失败</span>'
+      return "<tr><td>" + esc(t) + "</td><td>" + esc(e.label || e.key || "") + (e.phone ? '<small class="mono">' + esc(e.phone) + "</small>" : "") + "</td><td>" + esc(e.inviteCode || "") + "</td><td>" + pill + " " + esc(e.message || "") + "</td></tr>"
+    })
+    .join("")
+}
+
+async function loadAutoInvite() {
+  try {
+    renderAutoInvite(await api("/bind/api/auto-invite"))
+  } catch (e) {
+    const note = $("auto-invite-note")
+    if (note) note.textContent = "读取失败：" + String(e?.message ?? e)
+  }
+}
+
+on($("auto-invite-save"), async () => {
+  const codes = String($("auto-invite-codes").value || "")
+    .split(/[\s,，]+/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+  const d = await api("/bind/api/auto-invite", { enabled: $("auto-invite-enabled").checked, codes })
+  renderAutoInvite(d)
+  $("auto-invite-note").textContent = d.enabled ? ("已保存，共 " + codes.length + " 个码") : "已保存（未启用）"
+  toast(d.enabled ? "自动补邀请已开启" : "自动补邀请已关闭")
+})
+
+on($("auto-invite-now"), async () => {
+  const keys = [...(state.selected || [])].filter((k) => /^quwork(#\d+)?$/.test(k))
+  if (keys.length === 0) {
+    toast("先在表格里勾选要补邀请的号", true)
+    return
+  }
+  const note = $("auto-invite-note")
+  let ok = 0
+  for (const [i, key] of keys.entries()) {
+    note.textContent = "补邀请中 " + (i + 1) + "/" + keys.length + "…"
+    try {
+      const r = await api("/bind/api/auto-invite/run", { key })
+      if (r.ok) ok += 1
+    } catch {}
+    if (i < keys.length - 1) await new Promise((r) => setTimeout(r, 1500))
+  }
+  note.textContent = "完成：成功 " + ok + "/" + keys.length
+  toast("补邀请 成功 " + ok + "/" + keys.length, ok !== keys.length)
+  await loadAutoInvite()
+})
+
 on($("bind-refresh"), loadBindPool)
 
 // 只换筛选条件时不必再打上游：用最近一次数据重绘即可
