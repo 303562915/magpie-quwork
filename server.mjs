@@ -1597,18 +1597,26 @@ export const QuWorkPage = async (input = {}, options = {}) => {
   // 显式传 `port: 0` 表示「随便给我一个空闲口」（测试并行要用，生产不会传）。
   const startPort = explicitPort === 0 ? 0 : explicitPort !== null && explicitPort > 0 ? explicitPort : want
 
-  // ⚠ 默认端口（没人显式指定时用的 4392）**不再漂移**：
-  //   以前被占就回退 4392→4393→4394，结果每次 plugin update 端口会变，
-  //   书签打开是空白、公网隧道还指向旧端口。
-  //   只有「调用方显式给了端口」才允许回退（宿主/测试可以这么用）。
+  // ⚠ 默认端口（没人显式指定时用的 4392）优先占，但**不能因为一次占用就永久失败**：
+  //   plugin 热更新时旧实例要 1~2 秒才释放端口，直接判失败会让面板彻底打不开（真机踩到过）。
+  //   所以先重试约 10 秒；仍占不到才回退到相邻端口，并在日志里说清楚。
   const maxFallback = explicitPort !== null && explicitPort > 0 ? 3 : 1
-  const chosen = await pickPort({ start: startPort, max: maxFallback, isFree: options?.isFree })
+  let chosen = null
+  if (explicitPort === null && startPort !== 0) {
+    for (let i = 0; i < 20 && !chosen; i += 1) {
+      chosen = await pickPort({ start: startPort, max: 1, isFree: options?.isFree })
+      if (!chosen) await new Promise((r) => setTimeout(r, 500))
+    }
+    if (!chosen) chosen = await pickPort({ start: startPort, max: maxFallback + 2, isFree: options?.isFree })
+  } else {
+    chosen = await pickPort({ start: startPort, max: maxFallback, isFree: options?.isFree })
+  }
   if (!chosen && startPort !== 0) {
     return {
       ok: false,
       port: 0,
       close: async () => {},
-      reason: `${startPort} 被占用（默认端口已固定，不再漂移到别的口）`,
+      reason: `${startPort} 被占用（重试 10 秒仍失败）`,
     }
   }
 
