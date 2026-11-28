@@ -1167,7 +1167,8 @@ function renderBind(data) {
     `共 ${data?.total ?? allAccounts.length} · 已绑 ${data?.bound ?? 0} · 可分配 ${data?.available ?? 0}` +
     (data?.broken ? ` · 失效 ${data.broken}` : "") +
     (data?.todayCount ? ` · 今天注册 ${data.todayCount}` : "") +
-    (data?.inviteEligible ? ` · 可补邀请 ${data.inviteEligible}` : "")
+    (data?.inviteEligible ? ` · 还能赶窗口 ${data.inviteEligible}` : "") +
+    (data?.readyToInvite ? ` · 待补邀请 ${data.readyToInvite}` : "")
   $("bind-note").textContent = data?.updatedAt ? `快照：${fmtAgo(data.updatedAt)}` : "还没有快照，点「刷新全部账号状态」"
 
   $("bind-body").innerHTML = accounts.length
