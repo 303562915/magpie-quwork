@@ -754,7 +754,7 @@ export function createBindPortal(opts) {
            * 而每个会话会把号占住 10 分钟 —— 谁刷新几次页面，阵列就只剩 1 格甚至 0 格。
            * 复用不会产生新的授权码，只是把**同一张还在等的码**再显示一次，扫码行为完全一样。
            */
-          for (const cand of sessions.values()) {
+          for (const cand of scanOpts?.allowReuse === true ? sessions.values() : [].values()) {
             if (cand.status !== "pending") continue
             if (scanExclude.has(cand.key)) continue
             if (now() > cand.expiresAt) continue

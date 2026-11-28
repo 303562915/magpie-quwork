@@ -1161,6 +1161,7 @@ export function createPageServer(opts = {}) {
               filter: String(url.searchParams.get("f") || "24h"),
               // 已经拿到过的号不要再拿（复用分支会把同一个给回来）
               exclude: [...seen],
+              allowReuse: true,
             })
             if (!r.ok) break
             if (seen.has(r.key)) break
