@@ -1002,3 +1002,32 @@ test("§35 poolOverview 带 createdTime、registeredToday、inviteEligible", asy
   assert.equal(ov.todayCount, 1)
   assert.equal(ov.inviteEligible, 1)
 })
+
+// ── ㊱ prepareScan 的时间筛选（邀请码只认 24h）──────────────────────────
+
+test("§36 prepareScan({filter}) 只挑 24h 内注册的号；没有就明确说没有", async (t) => {
+  const dir = seed(t)
+  const nowSec = Math.floor(Date.now() / 1000)
+  // #1 是 3 天前注册的，#2 是今天注册的
+  const platform = fakePlatform({ createdTime: { "tok-aaa": nowSec - 3 * 86400, "tok-bbb": nowSec - 60 } })
+  const portal = createBindPortal({ configDir: dir, platformBaseUrl: PLATFORM, fetchImpl: platform.fetchImpl })
+  await portal.sync()
+
+  const r24 = await portal.prepareScan(undefined, { filter: "24h" })
+  assert.equal(r24.ok, true)
+  assert.equal(r24.label, "#2", "24h 内注册的是 #2")
+
+  // 只留 #1（老号）→ 24h 筛选下应该「没有」
+  const dir2 = seed(t)
+  const p2 = fakePlatform({ createdTime: { "tok-aaa": nowSec - 3 * 86400, "tok-bbb": nowSec - 3 * 86400 } })
+  const portal2 = createBindPortal({ configDir: dir2, platformBaseUrl: PLATFORM, fetchImpl: p2.fetchImpl })
+  await portal2.sync()
+  const none = await portal2.prepareScan(undefined, { filter: "24h" })
+  assert.equal(none.ok, false)
+  assert.equal(none.reason, "no-account")
+  assert.match(String(none.message), /24 小时/)
+
+  // filter: all 时老号也能出
+  const all = await portal2.prepareScan(undefined, { filter: "all" })
+  assert.equal(all.ok, true)
+})

@@ -1157,7 +1157,7 @@ export function createPageServer(opts = {}) {
             // ⚠ 必须走 prepareScan：它出的是「微信真正要扫的 confirm?uuid= 码」，
             //   并在后台监听扫码、自动换 wechat_token 完成绑定。
             //   allocate() 是旧链路（把 qrconnect 页面地址编成码），扫了只会登录、绑不上。
-            const r = await bindPortal.prepareScan()
+            const r = await bindPortal.prepareScan(undefined, { filter: String(url.searchParams.get("f") || "24h") })
             if (!r.ok || seen.has(r.key)) break
             seen.add(r.key)
             cards.push({
@@ -1184,7 +1184,7 @@ export function createPageServer(opts = {}) {
           }
           // 单号页同样走正确链路（prepareScan 会自动挑一个未绑的号；
           // 它出的是 confirm?uuid= 的真码，并在后台监听扫码自动绑定）
-          const r = await bindPortal.prepareScan()
+          const r = await bindPortal.prepareScan(undefined, { filter: String(url.searchParams.get("f") || "24h") })
           if (!r.ok) {
             const html =
               r.reason === "no-account" ? noAccountPage({ mount }) : errorPage(String(r.message ?? ""), { mount })
@@ -1290,7 +1290,7 @@ export function createPageServer(opts = {}) {
           const cards = []
           for (let i = 0; i < want; i += 1) {
             // 换码同样必须是「真码」：confirm?uuid= + 后台监听
-            const r = await bindPortal.prepareScan()
+            const r = await bindPortal.prepareScan(undefined, { filter: String(url.searchParams.get("f") || "24h") })
             if (!r.ok) break
             cards.push({
               sessionId: r.sessionId,

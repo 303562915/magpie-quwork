@@ -185,7 +185,7 @@ export function createBindServer(opts = {}) {
         const seen = new Set()
         for (let i = 0; i < want; i += 1) {
           // ⚠ 走 prepareScan：出的是 confirm?uuid= 的真码，且后台监听扫码自动绑定
-          const r = await portal.prepareScan()
+          const r = await portal.prepareScan(undefined, { filter: String(url.searchParams.get("f") || "24h") })
           if (!r.ok) break
           if (seen.has(r.key)) {
             // 不该发生（占位锁保证），真发生了也别重复展示
@@ -212,7 +212,7 @@ export function createBindServer(opts = {}) {
           return sendHtml(res, errorPage("操作太快了，请等几秒再扫一次", { mount }))
         }
         // 单号页也走正确链路（prepareScan 自动挑一个未绑的号）
-        const r = await portal.prepareScan()
+        const r = await portal.prepareScan(undefined, { filter: String(url.searchParams.get("f") || "24h") })
         if (!r.ok) {
           return sendHtml(res, r.reason === "no-account" ? noAccountPage({ mount }) : errorPage(String(r.message ?? ""), { mount }))
         }
@@ -289,7 +289,7 @@ export function createBindServer(opts = {}) {
         const want = Math.max(1, Math.min(6, Number(url.searchParams.get("n")) || 1))
         const cards = []
         for (let i = 0; i < want; i += 1) {
-          const r = await portal.prepareScan()
+          const r = await portal.prepareScan(undefined, { filter: String(url.searchParams.get("f") || "24h") })
           if (!r.ok) break
           cards.push({
             sessionId: r.sessionId,

@@ -696,9 +696,27 @@ export function createBindPortal(opts) {
      * @returns {Promise<{ok: boolean, reason?: string, message?: string, key?: string, label?: string,
      *   sessionId?: string, uuid?: string, confirmUrl?: string, qr?: string, ttlMs?: number}>}
      */
-    async prepareScan(key) {
+    async prepareScan(key, scanOpts) {
       sweep()
       const entries = listPoolTokens(configDir)
+      /**
+       * 自动挑号时的筛选：`24h`（默认，邀请码只认注册后 24 小时）/ `today` / `all`。
+       * 显式指定 key 时这个参数不生效。
+       */
+      const scanFilter = String(scanOpts?.filter ?? "24h").trim() || "24h"
+      /** 这个时间戳（秒）是否还在注册后 24 小时内。 */
+      const within24h = (sec) => {
+        const t = Number(sec) || 0
+        return t > 0 && Date.now() - t * 1000 <= 24 * 60 * 60 * 1000
+      }
+      /** 这个时间戳（秒）是不是本机今天。 */
+      const todayOf = (sec) => {
+        const t = Number(sec) || 0
+        if (t <= 0) return false
+        const d = new Date(t * 1000)
+        const n = new Date()
+        return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate()
+      }
 
       /**
        * 不传 key 时自动挑一个号（阵列页 / `/bind/go` 用）。
@@ -711,11 +729,32 @@ export function createBindPortal(opts) {
       if (!want) {
         const snap = readPool(configDir).accounts
         const taken = new Set([...locks.keys(), ...reserved.keys()])
+        // 快照里一条 createdTime 都没有（还没 sync 过）→ 时间筛选无意义，退化为不筛，
+        // 否则会把「还没同步」误判成「没有 24 小时内的号」，整个门户直接空掉。
+        const hasTimeInfo = entries.some((a) => Number(snap[a.key]?.createdTime) > 0)
+
         const free = entries
           .map((a) => a.key)
           .filter((k) => snap[k]?.wechatBound !== true && snap[k]?.tokenInvalid !== true && !taken.has(k))
+          .filter((k) => {
+            if (scanFilter === "all" || !hasTimeInfo) return true
+            const created = Number(snap[k]?.createdTime) || 0
+            if (scanFilter === "today") return todayOf(created)
+            return within24h(created)
+          })
         want = free[0] ?? ""
-        if (!want) return { ok: false, reason: "no-account", message: "池子里暂时没有可分配的账号" }
+        if (!want) {
+          return {
+            ok: false,
+            reason: "no-account",
+            message:
+              scanFilter === "24h"
+                ? "没有「注册 24 小时内」且未绑的号（邀请码只认这个窗口；给老号绑只做签到的话，把筛选切到全部）"
+                : scanFilter === "today"
+                  ? "今天没有新注册的未绑账号"
+                  : "池子里暂时没有可分配的账号",
+          }
+        }
         // ⚠ 必须在 await 之前就占住：两次并发进来会看到同一批空闲号，
         //   不预留就会把同一个号发两次（§17b 踩过）。成功后由 locks 接管，
         //   失败路径靠 TTL 过期自动回收。
