@@ -236,6 +236,8 @@ function sortedAccounts() {
 function renderAccounts(data) {
   const list = data?.accounts ?? []
   state.accounts = list
+  // 微信绑定状态在绑定池里（`/bind/api/pool`），账号列表本身不带，这里并进来
+  const bindOf = state.bindByKey instanceof Map ? state.bindByKey : new Map()
 
   const sum = list.reduce((acc, a) => acc + (Number(a.points) || 0), 0)
   const anyPoints = list.some((a) => a.points != null)
@@ -248,7 +250,7 @@ function renderAccounts(data) {
 
   const body = $("accounts-body")
   if (list.length === 0) {
-    body.innerHTML = '<tr><td colspan="7"><div class="empty">还没有 quwork 账号</div></td></tr>'
+    body.innerHTML = '<tr><td colspan="8"><div class="empty">还没有 quwork 账号</div></td></tr>'
     updateSelectionUi()
     return
   }
@@ -263,6 +265,11 @@ function renderAccounts(data) {
         <td class="col-check"><input type="checkbox" class="row-check" data-key="${esc(a.key)}" ${checked} aria-label="选择 ${esc(a.accountId)}"></td>
         <td>${esc(a.accountId || "—")}<small class="mono">${esc(a.key)}</small></td>
         <td><span class="pill ${st.cls}">${esc(st.text)}</span></td>
+        <td>${(() => {
+          const b = bindOf.get(a.key)
+          if (!b) return '<span class="muted">—</span>'
+          return b ? '<span class="pill done">已绑</span>' : '<span class="pill warn">未绑</span>'
+        })()}</td>
         <td>${a.points == null ? "—" : fmtNum(a.points)}</td>
         <td>${esc(fmtTime(a.expires))}<small>${esc(leftText)}</small></td>
         <td>${a.models == null ? "—" : fmtNum(a.models)}</td>
@@ -289,7 +296,14 @@ function updateSelectionUi() {
 }
 
 async function loadAccounts() {
-  const data = await api("/api/accounts")
+  // 两路一起拿：账号列表 + 绑定池（后者的 wechatBound 用来显示「已绑/未绑」）
+  const [data, pool] = await Promise.all([
+    api("/api/accounts"),
+    api("/bind/api/pool").catch(() => null),
+  ])
+  state.bindByKey = new Map(
+    (Array.isArray(pool?.accounts) ? pool.accounts : []).map((x) => [x.key, x.wechatBound === true]),
+  )
   renderAccounts(data)
   return data
 }
@@ -402,7 +416,7 @@ async function showQrRow(btn, key) {
 
     const row = document.createElement("tr")
     row.className = "qr-row"
-    row.innerHTML = `<td colspan="7">
+    row.innerHTML = `<td colspan="8">
       <div class="qr-box">
         <img class="qr-img" src="${esc(d.qr || "")}" alt="微信扫码绑定 ${esc(d.label || "")}" width="200" height="200">
         <div class="qr-side">
@@ -1585,7 +1599,7 @@ on($("refresh-models"), async () => {
     // ⚠ 失败必须**看得见**：否则表格永远停在「加载中…」（真机踩过）
     const msg = String(e?.message ?? e)
     setStatus(msg, false)
-    $("accounts-body").innerHTML = `<tr><td colspan="7"><div class="empty bad">无法连接面板服务：${esc(msg)}</div></td></tr>`
+    $("accounts-body").innerHTML = `<tr><td colspan="8"><div class="empty bad">无法连接面板服务：${esc(msg)}</div></td></tr>`
     $("accounts-cache-note").textContent = "连接失败"
     for (const [id, cols] of [["invite-body", 8], ["records-body", 4], ["reward-body", 8], ["gifts-body", 4]]) {
       const el = $(id)

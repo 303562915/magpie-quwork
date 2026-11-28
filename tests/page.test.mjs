@@ -382,7 +382,7 @@ test("T22-1) app.js 有 const BASE，且 api() 用 base + path（源码断言）
 test("T22-2) app.js 的首次加载失败时把错误写进表格（不停在「加载中」）", () => {
   const src = readFileSync(join("page", "assets", "app.js"), "utf8")
   assert.match(src, /无法连接面板服务/, "必须有可见的错误文案")
-  assert.match(src, /colspan="7"/, "错误行要占满账号表")
+  assert.match(src, /colspan="8"/, "错误行要占满账号表（账号表加了「微信」列，共 8 列）")
   // 启动 catch 里必须调用渲染/状态，而不是静默
   assert.match(src, /setStatus\(String\(e\?\.message \?\? e\), false\)|setStatus\(/, "错误要进状态条")
 })
