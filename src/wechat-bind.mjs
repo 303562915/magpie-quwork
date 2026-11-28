@@ -704,6 +704,8 @@ export function createBindPortal(opts) {
        * 显式指定 key 时这个参数不生效。
        */
       const scanFilter = String(scanOpts?.filter ?? "24h").trim() || "24h"
+      /** 已经拿到过的号（阵列一次要好几格时用，避免复用分支反复返回同一个）。 */
+      const scanExclude = new Set((Array.isArray(scanOpts?.exclude) ? scanOpts.exclude : []).map(String))
       /** 这个时间戳（秒）是否还在注册后 24 小时内。 */
       const within24h = (sec) => {
         const t = Number(sec) || 0
@@ -737,6 +739,7 @@ export function createBindPortal(opts) {
           .map((a) => a.key)
           .filter((k) => snap[k]?.wechatBound !== true && snap[k]?.tokenInvalid !== true && !taken.has(k))
           .filter((k) => {
+            if (scanExclude.has(k)) return false
             if (scanFilter === "all" || !hasTimeInfo) return true
             const created = Number(snap[k]?.createdTime) || 0
             if (scanFilter === "today") return todayOf(created)
@@ -744,6 +747,37 @@ export function createBindPortal(opts) {
           })
         want = free[0] ?? ""
         if (!want) {
+          /**
+           * 复用：同一个号已经有「还在等待扫码」的会话（码没过期）时直接拿它出来。
+           *
+           * 为什么必须有这一步：24 小时窗口内的号本来就少（当时只有 5 个），
+           * 而每个会话会把号占住 10 分钟 —— 谁刷新几次页面，阵列就只剩 1 格甚至 0 格。
+           * 复用不会产生新的授权码，只是把**同一张还在等的码**再显示一次，扫码行为完全一样。
+           */
+          for (const cand of sessions.values()) {
+            if (cand.status !== "pending") continue
+            if (scanExclude.has(cand.key)) continue
+            if (now() > cand.expiresAt) continue
+            if (!cand.qr || !cand.confirmUrl) continue
+            if (scanFilter !== "all" && hasTimeInfo) {
+              const created = Number(snap[cand.key]?.createdTime) || 0
+              const okTime = scanFilter === "today" ? todayOf(created) : within24h(created)
+              if (!okTime) continue
+            }
+            return {
+              ok: true,
+              reused: true,
+              key: cand.key,
+              label: labelOf(entries.map((a) => a.key), cand.key),
+              sessionId: cand.sessionId,
+              uuid: cand.uuid,
+              confirmUrl: cand.confirmUrl,
+              state: cand.state,
+              qr: cand.qr,
+              ttlMs: Math.max(0, cand.expiresAt - now()),
+            }
+          }
+
           return {
             ok: false,
             reason: "no-account",
@@ -822,6 +856,9 @@ export function createBindPortal(opts) {
           qr = ""
         }
       }
+
+      // 存下这张图：阵列重复刷新时直接复用同一张，不重复出码
+      session.qr = qr
 
       // 后台监听（不 await）：一来 code 就自己换 token 并绑定
       void watchScan(session)

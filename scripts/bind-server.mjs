@@ -185,7 +185,11 @@ export function createBindServer(opts = {}) {
         const seen = new Set()
         for (let i = 0; i < want; i += 1) {
           // ⚠ 走 prepareScan：出的是 confirm?uuid= 的真码，且后台监听扫码自动绑定
-          const r = await portal.prepareScan(undefined, { filter: String(url.searchParams.get("f") || "24h") })
+          const r = await portal.prepareScan(undefined, {
+            filter: String(url.searchParams.get("f") || "24h"),
+            // 已经拿到过的号不要再拿（复用分支会把同一个给回来）
+            exclude: [...seen],
+          })
           if (!r.ok) break
           if (seen.has(r.key)) {
             // 不该发生（占位锁保证），真发生了也别重复展示
