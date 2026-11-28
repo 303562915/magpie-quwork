@@ -1293,7 +1293,7 @@ function renderAutoInvite(d) {
 
 async function loadAutoInvite() {
   try {
-    renderAutoInvite(await api("/bind/api/auto-invite"))
+    renderAutoInvite(await api("/api/auto-invite"))
   } catch (e) {
     const note = $("auto-invite-note")
     if (note) note.textContent = "读取失败：" + String(e?.message ?? e)
@@ -1305,7 +1305,7 @@ on($("auto-invite-save"), async () => {
     .split(/[\s,，]+/)
     .map((x) => x.trim())
     .filter(Boolean)
-  const d = await api("/bind/api/auto-invite", { enabled: $("auto-invite-enabled").checked, codes })
+  const d = await api("/api/auto-invite", { enabled: $("auto-invite-enabled").checked, codes })
   renderAutoInvite(d)
   $("auto-invite-note").textContent = d.enabled ? ("已保存，共 " + codes.length + " 个码") : "已保存（未启用）"
   toast(d.enabled ? "自动补邀请已开启" : "自动补邀请已关闭")
@@ -1322,7 +1322,7 @@ on($("auto-invite-now"), async () => {
   for (const [i, key] of keys.entries()) {
     note.textContent = "补邀请中 " + (i + 1) + "/" + keys.length + "…"
     try {
-      const r = await api("/bind/api/auto-invite/run", { key })
+      const r = await api("/api/auto-invite/run", { key })
       if (r.ok) ok += 1
     } catch {}
     if (i < keys.length - 1) await new Promise((r) => setTimeout(r, 1500))

@@ -807,6 +807,34 @@ export function createPageServer(opts = {}) {
       return { ok: true, cached: false, at: stamp, updatedAt: stamp, okCount, failed, total: keys.length, accounts }
     },
 
+    /** 自动补邀请：读开关 + 码池 + 最近日志。 */
+    autoInviteStatus() {
+      const st = effectiveSettings(configDir, opts)
+      return {
+        ok: true,
+        enabled: st.autoInviteEnabled === true,
+        codes: Array.isArray(st.autoInviteCodes) ? st.autoInviteCodes : [],
+        ...bindPortal.autoInvite(),
+      }
+    },
+
+    /** 自动补邀请：保存开关 + 码池（清洗在 settingsSave 里统一做）。 */
+    async autoInviteSave(input) {
+      await api.settingsSave({
+        autoInviteEnabled: input?.enabled === true,
+        autoInviteCodes: Array.isArray(input?.codes) ? input.codes : [],
+      })
+      return api.autoInviteStatus()
+    },
+
+    /** 自动补邀请：给某个号补一次。 */
+    async autoInviteRun(input) {
+      const key = String(input?.key ?? "").trim()
+      if (!key) return { ok: false, message: "没有指定账号", ...bindPortal.autoInvite() }
+      const r = await bindPortal.autoInviteRun(key)
+      return { ok: r.ok === true, message: r.message ?? "", ...bindPortal.autoInvite() }
+    },
+
     /** 设置：读（含 magpie 界面开关提供的默认值，见 `effectiveSettings`）。 */
     async settings() {
       return { ok: true, settings: effectiveSettings(configDir, opts), path: settingsFile() }
@@ -1357,27 +1385,6 @@ export function createPageServer(opts = {}) {
           }, req, { head: isHead })
         }
 
-        // 自动补邀请：保存开关 + 邀请码池
-        if (isPost && rest === "/api/auto-invite") {
-          if (!bindPortal.authorize(req)) return sendAdminJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" }, req, { head: isHead })
-          const body = parsed === undefined ? await readJsonBody(req) : parsed
-          const r = await api.settingsSave({
-            autoInviteEnabled: body?.enabled === true,
-            autoInviteCodes: Array.isArray(body?.codes) ? body.codes : [],
-          })
-          return sendAdminJson(res, 200, { ok: true, settings: r.settings, ...bindPortal.autoInvite() }, req, { head: isHead })
-        }
-
-        // 自动补邀请：手动给某个号补一次
-        if (isPost && rest === "/api/auto-invite/run") {
-          if (!bindPortal.authorize(req)) return sendAdminJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" }, req, { head: isHead })
-          const body = parsed === undefined ? await readJsonBody(req) : parsed
-          const key = String(body?.key ?? "").trim()
-          if (!key) return sendAdminJson(res, 200, { ok: false, error: "没有指定账号" }, req, { head: isHead })
-          const r = await bindPortal.autoInviteRun(key)
-          return sendAdminJson(res, 200, { ok: r.ok, message: r.message, log: bindPortal.autoInvite().log }, req, { head: isHead })
-        }
-
         if (isGet && rest === "/api/sessions") {
           if (!bindPortal.authorize(req)) return sendAdminJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" }, req, { head: isHead })
           return sendAdminJson(res, 200, { ok: true, ...bindPortal.sessionsSnapshot() }, req, { head: isHead })
@@ -1420,6 +1427,7 @@ export function createPageServer(opts = {}) {
         if (name === "reward/status") return json(200, await api.rewardStatus())
         if (name === "reward/gifts") return json(200, await api.gifts({ key: url.searchParams.get("key") }))
         if (name === "settings") return json(200, await api.settings())
+        if (name === "auto-invite") return json(200, await api.autoInviteStatus())
         // 绑定流程的监听日志（最近 300 条）：GET，只读
         if (name === "wechat/log") return json(200, { ok: true, entries: bindLog })
         return json(404, { ok: false, error: "未知接口" })
@@ -1435,6 +1443,8 @@ export function createPageServer(opts = {}) {
           "accounts/delete": (i) => api.accountsDelete(i),
           "accounts/from-desktop": (i) => api.accountsFromDesktop(i),
           settings: (i) => api.settingsSave(i),
+          "auto-invite": (i) => api.autoInviteSave(i),
+          "auto-invite/run": (i) => api.autoInviteRun(i),
           "invite/summary": () => api.summary(),
           "invite/refresh": (i) => api.summaryRefresh(i),
           "invite/activate": (i) => api.activate(i),
