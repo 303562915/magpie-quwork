@@ -1330,6 +1330,12 @@ export function createPageServer(opts = {}) {
         }
 
         // 当前占位（只给数字，不含账号信息）
+        // 排查：当前会话 + 最近扫码事件（出码/已扫码/已确认/绑定/失败）
+        if (isGet && rest === "/api/sessions") {
+          if (!bindPortal.authorize(req)) return sendAdminJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" }, req, { head: isHead })
+          return sendAdminJson(res, 200, { ok: true, ...bindPortal.sessionsSnapshot() }, req, { head: isHead })
+        }
+
         if (isGet && rest === "/api/occupancy") {
           if (!bindPortal.authorize(req)) return sendAdminJson(res, 401, { ok: false, error: "需要管理员 token（或本机直连）" }, req, { head: isHead })
           return sendAdminJson(res, 200, { ok: true, ...bindPortal.occupancy() }, req, { head: isHead })

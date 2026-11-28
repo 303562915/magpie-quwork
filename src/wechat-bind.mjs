@@ -400,6 +400,19 @@ export function createBindPortal(opts) {
   const maxRenewals = Number.isInteger(opts?.maxRenewals) && opts.maxRenewals >= 0 ? opts.maxRenewals : 0
   /** 续码时现画二维码（注入点：测试给假实现，生产用默认编码器）。 */
   const qrPngImpl = opts?.qrPngImpl === null ? null : (typeof opts?.qrPngImpl === "function" ? opts.qrPngImpl : qrPng)
+
+  /**
+   * 扫码事件（最近 100 条，内存里）。
+   *
+   * 用来回答「我发了码给人，为什么没反应」：一看就知道是没扫到（只有 alloc），
+   * 还是扫了没确认（scanned），还是确认了但换 token / 绑定失败（confirmed + fail）。
+   */
+  const bindEvents = []
+  const pushEvent = (type, data = {}) => {
+  bindEvents.push({ at: now(), type, ...data })
+  while (bindEvents.length > 100) bindEvents.shift()
+  }
+
   const adminToken = String(opts?.adminToken ?? "").trim()
 
   /** sessionId → 会话 */
@@ -479,6 +492,7 @@ export function createBindPortal(opts) {
       session.lastSeenAt = now()
 
       if (r.state === "scanned") {
+        if (session.scanState !== "scanned") pushEvent("scanned", { key: session.key, sessionId: session.sessionId })
         session.scanState = "scanned" // 已扫码，等他点「确认登录」
         await sleep(minGapMs)
         continue
@@ -498,6 +512,7 @@ export function createBindPortal(opts) {
       }
 
       // ── 已确认：拿到 code，开始真正的绑定 ──
+      pushEvent("confirmed", { key: session.key, sessionId: session.sessionId })
       session.scanState = "confirmed"
       session.binding = true
       const token = String(listPoolTokens(configDir).find((a) => a.key === session.key)?.token ?? "").trim()
@@ -547,6 +562,7 @@ export function createBindPortal(opts) {
       session.status = "bound"
       session.settledAt = now()
       session.scanState = "bound"
+      pushEvent("bound", { key: session.key, label: labelOf(listPoolTokens(configDir).map((a) => a.key), session.key) })
       session.wechatId = after.ok ? after.wechatId : ""
       session.verified = Boolean(after.ok && after.wechatBound)
       markBound(session.key, { wechatId: session.wechatId })
@@ -665,7 +681,26 @@ export function createBindPortal(opts) {
       return { ok: true, releasedSessions, releasedLocks, releasedReserved, keptActive, overview: poolOverview({ configDir }) }
     },
 
-    /** 当前占位状态（不含任何账号信息，只给数字）。 */
+  /** 排查用：当前所有会话 + 最近扫码事件（回答「监测到了什么、卡在哪一步」）。 */
+    sessionsSnapshot() {
+      const keys = listPoolTokens(configDir).map((a) => a.key)
+      return {
+        sessions: [...sessions.values()].map((x) => ({
+          sessionId: x.sessionId,
+          key: x.key,
+          label: labelOf(keys, x.key),
+          status: x.status,
+          scanState: x.scanState ?? "",
+          attempts: x.attempts ?? 0,
+          issuedAt: x.issuedAt,
+          expiresAt: x.expiresAt,
+          error: x.scanError ?? "",
+        })),
+        events: [...bindEvents],
+      }
+    },
+
+  /** 当前占位状态（不含任何账号信息，只给数字）。 */
     occupancy() {
       return { sessions: sessions.size, locks: locks.size, reserved: reserved.size }
     },
@@ -859,6 +894,7 @@ export function createBindPortal(opts) {
 
       // 存下这张图：阵列重复刷新时直接复用同一张，不重复出码
       session.qr = qr
+      pushEvent("alloc", { key: want, label: labelOf(entries.map((a) => a.key), want), sessionId })
 
       // 后台监听（不 await）：一来 code 就自己换 token 并绑定
       void watchScan(session)
