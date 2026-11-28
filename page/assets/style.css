@@ -190,6 +190,6 @@ small { display: block; font-size: 11px; color: var(--muted); }
 .bind-codes { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin: 12px 0; }
 .bind-codes[hidden] { display: none; }
 .bind-codes .code-card { border: 1px solid var(--line); border-radius: 12px; padding: 10px; background: var(--surface); display: flex; flex-direction: column; gap: 6px; align-items: center; }
-.bind-codes .code-card img { width: 100%; max-width: 150px; height: auto; border-radius: 6px; }
+.bind-codes .code-card img { width: 100%; max-width: 200px; height: auto; border-radius: 6px; background: #fff; }
 .bind-codes .code-card .lb { font-weight: 700; font-size: 14px; }
 .bind-codes .code-card .st { font-size: 12px; color: var(--muted, #6b7280); text-align: center; }

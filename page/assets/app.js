@@ -1204,6 +1204,7 @@ on($("bind-batch"), async () => {
         (c, i) => `<div class="code-card" data-i="${i}">
         <div class="lb">${esc(c.label)}</div>
         <img src="${esc(c.qr || "")}" alt="${esc(c.label)}">
+        <button class="tiny" data-code-act="big" data-i="${i}">看大图（可另存/转发）</button>
         <button class="tiny" data-code-act="copy" data-i="${i}">复制链接</button>
         <div class="st" data-code-st="${i}">等待扫码…</div>
       </div>`,
@@ -1211,6 +1212,14 @@ on($("bind-batch"), async () => {
       .join("")
 
     // 复制 + 每张独立轮询状态
+    box.querySelectorAll('[data-code-act="big"]').forEach((b) => {
+      b.addEventListener("click", () => {
+        const c = (d.cards ?? [])[Number(b.dataset.i)]
+        if (!c?.qr) return
+        const w = window.open("", "_blank")
+        if (w) w.document.write('<img src="' + c.qr + '" style="width:100%;max-width:520px">')
+      })
+    })
     box.querySelectorAll('[data-code-act="copy"]').forEach((b) => {
       b.addEventListener("click", async () => {
         const c = (d.cards ?? [])[Number(b.dataset.i)]
